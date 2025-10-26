@@ -130,9 +130,10 @@ Be aware of ChatGPT's limitations:
 - [OpenAI API Reference](https://platform.openai.com/docs/api-reference)
 
 ### Learning Resources
-- OpenAI Cookbook: Example code and guides
-- Community Forums: Discussion and shared experiences
-- YouTube Tutorials: Video guides on using ChatGPT effectively
+- [OpenAI Cookbook](https://cookbook.openai.com/): Example code and guides for using OpenAI APIs
+- [OpenAI Community Forum](https://community.openai.com/): Discussion and shared experiences
+- Search for "ChatGPT tutorials" on YouTube for video guides on using ChatGPT effectively
+- Practice by experimenting with different types of prompts and use cases
 
 ### Responsible Use
 - Be mindful of privacy: Don't share sensitive personal information
