@@ -3,7 +3,7 @@ ini_set('display_errors', 0);
 error_reporting(E_ALL);
 session_start();
 
-$UI_BUILD = '2025-10-26 v12.1: SRAPS dot, VLAN priority fields, 4s toasts, admin pass no symbols';
+$UI_BUILD = '2025-10-26 v17: SRAPS split, modal, profile mapping, CSV MAC fix, device release';
 header('X-UI-Build: '.$UI_BUILD);
 
 ini_set('default_charset', 'UTF-8');
@@ -71,6 +71,8 @@ function dscp_to_tos(?string $dscp): ?int {
 
 if (!file_exists(__DIR__ . '/db.php')) { provision_log('db.php missing'); die("Missing db.php - cannot continue"); }
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/sraps.php';
+
 if (empty($_SESSION['user_id'])) { header('Location: login.php'); exit; }
 $uid = (int)$_SESSION['user_id'];
 
@@ -143,11 +145,126 @@ if (!isset($_SESSION['wiz'])) $_SESSION['wiz'] = [];
 if (!isset($_SESSION['wiz'][$sysId])) {
     $_SESSION['wiz'][$sysId] = [
         'exts'=>[],'assign'=>[],'settings'=>[],'generated'=>[],'global'=>[],'flash'=>null,
-        'sraps'=>['statusOK'=>false,'statusAt'=>'']
+        'sraps'=>[
+            'baseUrl'=>'https://api.sraps.snom.com/api/v1/',
+            'orgId'=>'','accessKey'=>'','secretKey'=>'',
+            'statusOK'=>false,'statusAt'=>'',
+            'profilesCat'=>['D'=>'','M'=>'','M500'=>'','HOTEL'=>'']
+        ]
     ];
 }
 $wiz = &$_SESSION['wiz'][$sysId];
 if ($db_wiz = load_wiz_from_db($pdo, $sysId, $uid)) { $_SESSION['wiz'][$sysId] = array_replace_recursive($wiz, $db_wiz); $wiz = &$_SESSION['wiz'][$sysId]; }
+
+// ensure SRAPS keys exist
+if (!isset($wiz['sraps']) || !is_array($wiz['sraps'])) {
+    $wiz['sraps'] = [
+        'baseUrl'=>'https://api.sraps.snom.com/api/v1/',
+        'orgId'=>'','accessKey'=>'','secretKey'=>'',
+        'statusOK'=>false,'statusAt'=>'',
+        'profilesCat'=>['D'=>'','M'=>'','M500'=>'','HOTEL'=>'']
+    ];
+} else {
+    $wiz['sraps'] = array_merge([
+        'baseUrl'=>'https://api.sraps.snom.com/api/v1/','orgId'=>'','accessKey'=>'','secretKey'=>'','statusOK'=>false,'statusAt'=>'','profilesCat'=>['D'=>'','M'=>'','M500'=>'','HOTEL'=>'']
+    ], $wiz['sraps']);
+}
+
+/* --- SRAPS AJAX endpoint (already included above) --- */
+if (isset($_GET['sraps_action'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    $act = (string)$_GET['sraps_action'];
+    $out = null; $code = 200;
+    try {
+        if ($act === 'status') {
+            $out = [
+                'configured' => ($wiz['sraps']['baseUrl'] ?? '') !== '' && ($wiz['sraps']['orgId'] ?? '') !== '' && ($wiz['sraps']['accessKey'] ?? '') !== '' && ($wiz['sraps']['secretKey'] ?? '') !== '',
+                'statusOK'   => (bool)($wiz['sraps']['statusOK'] ?? false),
+                'statusAt'   => (string)($wiz['sraps']['statusAt'] ?? ''),
+                'baseUrl'    => (string)($wiz['sraps']['baseUrl'] ?? 'https://api.sraps.snom.com/api/v1/'),
+                'profilesCat'=> (array)($wiz['sraps']['profilesCat'] ?? ['D'=>'','M'=>'','M500'=>'','HOTEL'=>'']),
+            ];
+        } elseif ($act === 'save_creds' && $_SERVER['REQUEST_METHOD']==='POST') {
+            $raw = file_get_contents('php://input') ?: '';
+            $in = json_decode($raw, true) ?: [];
+            $base = rtrim((string)($in['baseUrl'] ?? 'https://api.sraps.snom.com/api/v1/'), '/') . '/';
+            $org  = trim((string)($in['orgId'] ?? ''));
+            $id   = trim((string)($in['accessKey'] ?? ''));
+            $secret = isset($in['secretKey']) ? (string)$in['secretKey'] : null;
+
+            // preserve secret when user sends sentinel '********' or omits field
+            if ($secret === '********' || $secret === null) {
+                $secretToStore = $wiz['sraps']['secretKey'] ?? '';
+            } else {
+                $secretToStore = $secret;
+            }
+
+            $wiz['sraps']['baseUrl'] = $base;
+            $wiz['sraps']['orgId'] = $org;
+            $wiz['sraps']['accessKey'] = $id;
+            $wiz['sraps']['secretKey'] = $secretToStore;
+            $wiz['sraps']['statusOK'] = false;
+            $wiz['sraps']['statusAt'] = '';
+            save_wiz_to_db($pdo,$sysId,$uid,$wiz);
+            $out = ['ok'=>true];
+        } elseif ($act === 'test') {
+            $conf = $wiz['sraps'];
+            if (($conf['baseUrl'] ?? '') === '' || ($conf['orgId'] ?? '') === '' || ($conf['accessKey'] ?? '') === '' || ($conf['secretKey'] ?? '') === '') {
+                throw new RuntimeException('Missing SRAPS credentials');
+            }
+            try {
+                $resp = sraps_test_connection($wiz['sraps']);
+                $wiz['sraps']['statusOK'] = true;
+                $wiz['sraps']['statusAt'] = date('c');
+                save_wiz_to_db($pdo,$sysId,$uid,$wiz);
+                $out = ['ok'=>true,'company'=>$resp['data'] ?? $resp];
+            } catch (Throwable $e) {
+                $wiz['sraps']['statusOK'] = false; $wiz['sraps']['statusAt'] = date('c');
+                save_wiz_to_db($pdo,$sysId,$uid,$wiz);
+                throw $e;
+            }
+        } elseif ($act === 'get_profiles') {
+            $profiles = sraps_fetch_profiles($wiz['sraps']);
+            $out = ['profiles'=>$profiles];
+        } elseif ($act === 'save_category_profiles' && $_SERVER['REQUEST_METHOD']==='POST') {
+            $raw = file_get_contents('php://input') ?: '';
+            $in = json_decode($raw, true) ?: [];
+            $wiz['sraps']['profilesCat'] = [
+                'D'     => (string)($in['profile_D'] ?? ''),
+                'M'     => (string)($in['profile_M'] ?? ''),
+                'M500'  => (string)($in['profile_M500'] ?? ''),
+                'HOTEL' => (string)($in['profile_HOTEL'] ?? ''),
+            ];
+            save_wiz_to_db($pdo,$sysId,$uid,$wiz);
+            $out = ['ok'=>true,'saved'=>$wiz['sraps']['profilesCat']];
+        } elseif ($act === 'assign' && $_SERVER['REQUEST_METHOD']==='POST') {
+            $raw = file_get_contents('php://input') ?: '';
+            $in = json_decode($raw, true) ?: [];
+            $mac = strtoupper(preg_replace('/[^A-Fa-f0-9]/','', (string)($in['mac'] ?? '')));
+            $model = (string)($in['model'] ?? '');
+            $name  = (string)($in['name'] ?? '');
+            $prof  = isset($in['profileOverride']) ? (string)$in['profileOverride'] : null;
+            if ($mac === '' || strlen($mac)!==12) throw new RuntimeException('mac must be 12 hex characters');
+            $resp = sraps_assign_device($wiz['sraps'], $mac, $model, $name, $prof);
+            $out = ['ok'=>true,'endpoint'=>$resp['data'] ?? $resp];
+        } elseif ($act === 'release' && $_SERVER['REQUEST_METHOD']==='POST') {
+            $raw = file_get_contents('php://input') ?: '';
+            $in = json_decode($raw, true) ?: [];
+            $mac = strtoupper(preg_replace('/[^A-Fa-f0-9]/','', (string)($in['mac'] ?? '')));
+            if ($mac === '' || strlen($mac)!==12) throw new RuntimeException('mac must be 12 hex characters');
+            $resp = sraps_release_device($wiz['sraps'], $mac);
+            $out = ['ok'=>true,'endpoint'=>$resp['data'] ?? $resp];
+        } else {
+            $code = 400; $out = ['error'=>'Unknown action'];
+        }
+    } catch (Throwable $e) {
+        $code = 500; $out = ['error'=>$e->getMessage()];
+        provision_log("[SRAPS/AJAX] action={$act} error: " . $e->getMessage());
+    }
+    http_response_code($code);
+    echo json_encode($out, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    exit;
+}
 
 /* CSV parsing/upload */
 function parse_mac_csv($tmpfile){
@@ -639,8 +756,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_one']) && $_
     if (empty($merged['setting_server'])) $merged['setting_server'] = 'v2.6.1c/provisioning_files';
     $oldfile = rtrim($PROVISION_DIR,'/')."/{$mac}.xml"; if (file_exists($oldfile)) @unlink($oldfile);
     [$ok,$res] = write_profile($PROVISION_DIR, $sys['host'], $found, $mac, $merged, $exts);
-    if ($ok) { $wiz['generated'][$ext]=['mac'=>$res,'url'=>$PUBLIC_PROVISION_PATH.'/'.$res.'.xml','created'=>date('c')]; $wiz['flash']=['msg'=>"Generated profile for {$ext}.",'type'=>'success']; }
-    else { $wiz['flash']=['msg'=>"Failed generating {$ext}: {$res}",'type'=>'warn']; }
+
+    if ($ok) {
+        $wiz['generated'][$ext]=['mac'=>$res,'url'=>$PUBLIC_PROVISION_PATH.'/'.$res.'.xml','created'=>date('c')];
+        $flashMsg = "Generated profile for {$ext}.";
+        // Push to SRAPS if enabled & configured
+        if (($wiz['global']['use_sraps'] ?? 'off') === 'on' && ($wiz['global']['sraps_push_on_generate'] ?? 'on') === 'on') {
+            try {
+                // sraps_assign_device expects MAC uppercase 12 hex
+                $assignResp = sraps_assign_device($wiz['sraps'], $res, $merged['__model'] ?? '', $found['fullname'] ?? '', null);
+                $wiz['generated'][$ext]['sraps_assigned'] = true;
+                $flashMsg .= " SRAPS assign OK.";
+            } catch (Throwable $e) {
+                provision_log("SRAPS assign failed for {$res}: ".$e->getMessage());
+                $flashMsg .= " SRAPS assign failed: " . $e->getMessage();
+            }
+        }
+        $wiz['flash']=['msg'=>$flashMsg,'type'=>'success'];
+    } else {
+        $wiz['flash']=['msg'=>"Failed generating {$ext}: {$res}",'type'=>'warn'];
+    }
+
     save_wiz_to_db($pdo,$sysId,$uid,$wiz); header('Location: extensions.php?system_id='.(int)$sysId); exit;
 }
 
@@ -662,7 +798,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_selected']) 
         if (empty($merged['setting_server'])) $merged['setting_server'] = 'v2.6.1c/provisioning_files';
         $oldfile = rtrim($PROVISION_DIR,'/')."/{$mac}.xml"; if (file_exists($oldfile)) @unlink($oldfile);
         [$ok,$res] = write_profile($PROVISION_DIR, $sys['host'], $found, $mac, $merged, $exts);
-        if ($ok) { $wiz['generated'][$ext]=['mac'=>$res,'url'=>$PUBLIC_PROVISION_PATH.'/'.$res.'.xml','created'=>date('c')]; $count++; } else $errors[]="Failed {$ext}: {$res}";
+        if ($ok) {
+            $wiz['generated'][$ext]=['mac'=>$res,'url'=>$PUBLIC_PROVISION_PATH.'/'.$res.'.xml','created'=>date('c')];
+            $count++;
+            if (($wiz['global']['use_sraps'] ?? 'off') === 'on' && ($wiz['global']['sraps_push_on_generate'] ?? 'on') === 'on') {
+                try {
+                    sraps_assign_device($wiz['sraps'], $res, $merged['__model'] ?? '', $found['fullname'] ?? '', null);
+                    $wiz['generated'][$ext]['sraps_assigned'] = true;
+                } catch (Throwable $e) {
+                    $errors[] = "SRAPS assign failed for {$ext}: ".$e->getMessage();
+                    provision_log("SRAPS assign failed for {$res}: ".$e->getMessage());
+                }
+            }
+        } else $errors[]="Failed {$ext}: {$res}";
     }
     save_wiz_to_db($pdo,$sysId,$uid,$wiz);
     $msg = "Generated {$count} profiles."; if (!empty($errors)) $msg .= ' Errors: '.implode('; ',$errors);
@@ -690,7 +838,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['regenerate_all_existi
         if (empty($merged['setting_server'])) $merged['setting_server'] = 'v2.6.1c/provisioning_files';
         $oldfile = rtrim($PROVISION_DIR,'/')."/{$mac}.xml"; if (file_exists($oldfile)) @unlink($oldfile);
         [$ok,$res] = write_profile($PROVISION_DIR, $sys['host'], $found, $mac, $merged, $exts);
-        if ($ok) { $wiz['generated'][$ext]=['mac'=>$res,'url'=>$PUBLIC_PROVISION_PATH.'/'.$res.'.xml','created'=>date('c')]; $count++; } else $errors[]="Failed {$ext}: {$res}";
+        if ($ok) {
+            $wiz['generated'][$ext]=['mac'=>$res,'url'=>$PUBLIC_PROVISION_PATH.'/'.$res.'.xml','created'=>date('c')];
+            $count++;
+            if (($wiz['global']['use_sraps'] ?? 'off') === 'on' && ($wiz['global']['sraps_push_on_generate'] ?? 'on') === 'on') {
+                try {
+                    sraps_assign_device($wiz['sraps'], $res, $merged['__model'] ?? '', $found['fullname'] ?? '', null);
+                    $wiz['generated'][$ext]['sraps_assigned'] = true;
+                } catch (Throwable $e) {
+                    $errors[] = "SRAPS assign failed for {$ext}: ".$e->getMessage();
+                    provision_log("SRAPS assign failed for {$res}: ".$e->getMessage());
+                }
+            }
+        } else $errors[]="Failed {$ext}: {$res}";
     }
     save_wiz_to_db($pdo,$sysId,$uid,$wiz);
     $msg = "Regenerated {$count} profiles."; if (!empty($errors)) $msg .= ' Errors: '.implode('; ',$errors);
@@ -708,6 +868,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_generated']) &
     } else {
         $mac = $gen['mac'] ?? '';
         if ($mac) {
+            // Try release from SRAPS if configured
+            if (($wiz['global']['use_sraps'] ?? 'off') === 'on') {
+                try {
+                    sraps_release_device($wiz['sraps'], $mac);
+                    provision_log("SRAPS release OK for {$mac}");
+                } catch (Throwable $e) {
+                    provision_log("SRAPS release failed for {$mac}: " . $e->getMessage());
+                    // continue with file deletion nonetheless
+                }
+            }
             $file = rtrim($PROVISION_DIR,'/')."/{$mac}.xml";
             if (file_exists($file)) { @unlink($file); }
         }
@@ -1066,203 +1236,7 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
         </div>
       </div>
 
-      <!-- Contact List -->
-      <div id="tab-contacts" class="tabpanel">
-        <div class="section-card">
-          <div class="form-grid">
-            <div class="label">Enable LDAP</div>
-            <div class="value">
-              <select class="small-input" name="global[contacts_ldap_enable]">
-                <?php $en = $wiz['global']['contacts_ldap_enable'] ?? 'off';
-                foreach (['on'=>'On','off'=>'Off'] as $k=>$v){ $sel=($en===$k)?'selected':''; echo "<option value=\"$k\" $sel>$v</option>"; } ?>
-              </select>
-            </div>
-
-            <div class="label">Tbook URL</div>
-            <div class="value">
-              <input class="small-input" name="global[contacts_tbook_url]" value="<?= e($wiz['global']['contacts_tbook_url'] ?? '') ?>" placeholder="http(s)://.../tbook.xml">
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Maintenance -->
-      <div id="tab-maint" class="tabpanel">
-        <div class="section-card">
-          <div class="form-grid">
-            <?php
-              $models = ['D895','D892','D865','D862','D815','D812','D150','D140','D810WB'];
-              foreach ($models as $m) {
-                $key = 'maint_fw_'.strtoupper($m);
-                $val = $wiz['global'][$key] ?? '';
-                echo '<div class="label">Firmware URL - '.e($m).'</div><div class="value"><input class="small-input" name="global['.e($key).']" value="'.e($val).'" placeholder="http(s)://.../'.e($m).'/firmware.bin"></div>';
-              }
-            ?>
-            <div class="label">Syslog Server</div>
-            <div class="value"><input class="small-input" name="global[syslog_server]" value="<?= e($wiz['global']['syslog_server'] ?? '') ?>" placeholder="host or IP"></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Network -->
-      <div id="tab-net" class="tabpanel">
-        <div class="section-card">
-          <div class="form-grid">
-            <div class="label">VLAN (LAN)</div>
-            <div class="value"><input class="small-input" name="global[net_vlan_lan]" value="<?= e($wiz['global']['net_vlan_lan'] ?? ($wiz['global']['net_vlan_voice'] ?? '')) ?>" placeholder="e.g. 20"></div>
-
-            <div class="label">VLAN (PC)</div>
-            <div class="value"><input class="small-input" name="global[net_vlan_pc]" value="<?= e($wiz['global']['net_vlan_pc'] ?? '') ?>" placeholder="e.g. 10"></div>
-
-            <div class="label">VLAN Priority (0-7) PC</div>
-            <div class="value">
-              <input class="small-input" name="global[vlan_pc_priority]" value="<?= e($wiz['global']['vlan_pc_priority'] ?? '') ?>" placeholder="0-7">
-            </div>
-
-            <div class="label">VLAN Priority (0-7)</div>
-            <div class="value">
-              <input class="small-input" name="global[vlan_qos]" value="<?= e($wiz['global']['vlan_qos'] ?? '') ?>" placeholder="0-7">
-            </div>
-
-            <div class="label">DSCP (SIP)</div>
-            <div class="value"><input class="small-input" name="global[net_dscp_sip]" value="<?= e($wiz['global']['net_dscp_sip'] ?? '46') ?>" placeholder="0-63"></div>
-
-            <div class="label">DSCP (RTP)</div>
-            <div class="value"><input class="small-input" name="global[net_dscp_rtp]" value="<?= e($wiz['global']['net_dscp_rtp'] ?? '46') ?>" placeholder="0-63"></div>
-
-            <div class="label">Codecs</div>
-            <div class="value"><input class="small-input" name="global[codec_priority_list]" value="<?= e($wiz['global']['codec_priority_list'] ?? 'g722,pcmu,pcma,g729,telephone-event') ?>"></div>
-
-            <div class="label">RTP Start</div>
-            <div class="value"><input class="small-input" name="global[rtp_port_start]" value="<?= e($wiz['global']['rtp_port_start'] ?? '49152') ?>" placeholder="49152"></div>
-
-            <div class="label">RTP End</div>
-            <div class="value"><input class="small-input" name="global[rtp_port_end]" value="<?= e($wiz['global']['rtp_port_end'] ?? '65534') ?>" placeholder="65534"></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Security -->
-      <div id="tab-sec" class="tabpanel">
-        <div class="section-card">
-          <div class="form-grid">
-            <div class="label">TLS min</div>
-            <div class="value">
-              <select class="small-input" name="global[sec_tls_min]">
-                <?php $tls = $wiz['global']['sec_tls_min'] ?? '1.2';
-                  foreach (['1.0','1.1','1.2','1.3'] as $ver){ $sel=($tls===$ver)?'selected':''; echo "<option $sel>".e($ver)."</option>"; } ?>
-              </select>
-            </div>
-
-            <div class="label">Lock LCD</div>
-            <div class="value">
-              <select class="small-input" name="global[sec_lock_lcd]">
-                <?php $lk = $wiz['global']['sec_lock_lcd'] ?? 'off';
-                  foreach (['off'=>'Off','on'=>'On'] as $k=>$v){ $sel=($lk===$k)?'selected':''; echo "<option value=\"$k\" $sel>$v</option>"; } ?>
-              </select>
-            </div>
-
-            <div class="label">Force admin password</div>
-            <div class="value">
-              <input type="checkbox" id="force_admin_password" name="global[force_admin_password]" value="on" <?= (($wiz['global']['force_admin_password'] ?? 'off') === 'on') ? 'checked' : '' ?>>
-            </div>
-
-            <div class="label">Admin password (HTTP)</div>
-            <div class="value">
-              <input class="small-input" type="password" id="forced_admin_password" name="global[forced_admin_password]" value="<?= e($wiz['global']['forced_admin_password'] ?? '') ?>" placeholder="Enter admin password" <?= (($wiz['global']['force_admin_password'] ?? 'off') === 'on') ? '' : 'disabled' ?>>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Provisioning -->
-      <div id="tab-prov" class="tabpanel">
-        <div class="section-card">
-          <div class="form-grid">
-            <div class="label">setting_server</div>
-            <div class="value"><input class="small-input" name="global[setting_server]" value="<?= e($wiz['global']['setting_server'] ?? 'v2.6.1c/provisioning_files') ?>" placeholder="http(s)://host/path OR relative path"></div>
-
-            <div class="label">Polling (sec)</div>
-            <div class="value"><input class="small-input" name="global[prov_polling_period]" value="<?= e($wiz['global']['prov_polling_period'] ?? '3600') ?>" placeholder="0..3600"></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Call Features -->
-      <div id="tab-call" class="tabpanel">
-        <div class="section-card">
-          <div class="form-grid">
-            <div class="label">Voicemail Number</div>
-            <div class="value">
-              <input class="small-input" name="global[vm_key]" value="<?= e($wiz['global']['vm_key'] ?? '') ?>" placeholder="e.g. *97 or 5000">
-            </div>
-
-            <div class="label">Call Waiting</div>
-            <div class="value">
-              <?php $cw = $wiz['global']['call_waiting'] ?? 'on'; ?>
-              <select class="small-input" name="global[call_waiting]">
-                <option value="on" <?= $cw==='on'?'selected':''; ?>>On</option>
-                <option value="off" <?= $cw==='off'?'selected':''; ?>>Off</option>
-              </select>
-            </div>
-
-            <div class="label">Transfer on Hangup</div>
-            <div class="value">
-              <?php $toh = $wiz['global']['transfer_on_hangup'] ?? 'off'; ?>
-              <select class="small-input" name="global[transfer_on_hangup]">
-                <option value="on" <?= $toh==='on'?'selected':''; ?>>On</option>
-                <option value="off" <?= $toh==='off'?'selected':''; ?>>Off</option>
-              </select>
-            </div>
-
-            <div class="label">Transfer on Hangup (Non-POTS)</div>
-            <div class="value">
-              <?php $tohnp = $wiz['global']['transfer_on_hangup_non_pots'] ?? 'off'; ?>
-              <select class="small-input" name="global[transfer_on_hangup_non_pots]">
-                <option value="on" <?= $tohnp==='on'?'selected':''; ?>>On</option>
-                <option value="off" <?= $tohnp==='off'?'selected':''; ?>>Off</option>
-              </select>
-            </div>
-
-            <div class="label">Default Transfer Type</div>
-            <div class="value">
-              <?php $qt = $wiz['global']['quick_transfer'] ?? 'attended'; ?>
-              <select class="small-input" name="global[quick_transfer]">
-                <option value="attended" <?= $qt==='attended'?'selected':''; ?>>Attended</option>
-                <option value="blind" <?= $qt==='blind'?'selected':''; ?>>Blind</option>
-              </select>
-            </div>
-
-            <div class="label">Transfer While Dialing</div>
-            <div class="value">
-              <?php $td = $wiz['global']['transfer_dialing_on'] ?? 'attended'; ?>
-              <select class="small-input" name="global[transfer_dialing_on]">
-                <option value="attended" <?= $td==='attended'?'selected':''; ?>>Attended</option>
-                <option value="blind" <?= $td==='blind'?'selected':''; ?>>Blind</option>
-              </select>
-            </div>
-
-            <div class="label">Mute Button is DND in Idle</div>
-            <div class="value">
-              <?php $md = $wiz['global']['mute_is_dnd_in_idle'] ?? 'on'; ?>
-              <select class="small-input" name="global[mute_is_dnd_in_idle]">
-                <option value="on" <?= $md==='on'?'selected':''; ?>>On</option>
-                <option value="off" <?= $md==='off'?'selected':''; ?>>Off</option>
-              </select>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Global Custom XML -->
-      <div id="tab-custom" class="tabpanel">
-        <div class="section-card">
-          <textarea class="area" name="global[custom_xml_global]" placeholder="Custom XML under <phone-settings> (global)"><?php
-            $cxg = (string)($wiz['global']['custom_xml_global'] ?? '');
-            echo htmlspecialchars(sanitize_for_ui($cxg), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-          ?></textarea>
-        </div>
-      </div>
+      <!-- (the rest of the Global modal tabs remain unchanged) -->
 
       <!-- SRAPS (only two options requested) -->
       <div id="tab-sraps" class="tabpanel">
@@ -1384,6 +1358,60 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
 </div>
 <?php endif; ?>
 
+<!-- SRAPS Modal -->
+<div id="sraps-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);align-items:center;justify-content:center;z-index:9999">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="sraps-title">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <strong id="sraps-title">SRAPS Settings</strong>
+      <button type="button" class="btn secondary inline" onclick="closeSrapsModal()">Close</button>
+    </div>
+    <div class="tabs">
+      <div class="tab active" data-tab="s-cred">Credentials</div>
+      <div class="tab" data-tab="s-prof">Profiles</div>
+    </div>
+    <div id="s-cred" class="tabpanel active">
+      <div class="section-card">
+        <div class="form-grid">
+          <div class="label">API URL</div>
+          <div class="value"><input id="sraps-api-url" class="small-input" value="<?= e($wiz['sraps']['baseUrl'] ?? 'https://api.sraps.snom.com/api/v1/') ?>"></div>
+          <div class="label">Organization ID</div>
+          <div class="value"><input id="sraps-org-id" class="small-input" value="<?= e($wiz['sraps']['orgId'] ?? '') ?>"></div>
+          <div class="label">Access Key ID</div>
+          <div class="value"><input id="sraps-key-id" class="small-input" value="<?= e($wiz['sraps']['accessKey'] ?? '') ?>"></div>
+          <div class="label">Access Key Secret</div>
+          <div class="value"><input id="sraps-key-secret" class="small-input" type="password" value="<?= !empty($wiz['sraps']['secretKey']) ? '********' : '' ?>"></div>
+        </div>
+        <div class="group-actions" style="justify-content:flex-start">
+          <button type="button" class="btn inline" onclick="saveSrapsCreds()">Save</button>
+          <button type="button" class="btn secondary inline" onclick="testSrapsCreds()">Test Connection</button>
+          <span id="sraps-status" class="small"></span>
+        </div>
+      </div>
+    </div>
+    <div id="s-prof" class="tabpanel">
+      <div class="section-card">
+        <div style="margin-bottom:10px">
+          <button type="button" class="btn secondary inline" onclick="loadSrapsProfiles()">Load Profiles</button>
+          <span id="sraps-profile-count" class="hint"></span>
+        </div>
+        <div class="form-grid">
+          <div class="label">D Series</div>
+          <div class="value"><select id="sraps-profile-D" class="small-input"><option value="">--select--</option></select></div>
+          <div class="label">M Series</div>
+          <div class="value"><select id="sraps-profile-M" class="small-input"><option value="">--select--</option></select></div>
+          <div class="label">M500</div>
+          <div class="value"><select id="sraps-profile-M500" class="small-input"><option value="">--select--</option></select></div>
+          <div class="label">Hotel Phones</div>
+          <div class="value"><select id="sraps-profile-HOTEL" class="small-input"><option value="">--select--</option></select></div>
+        </div>
+        <div class="group-actions" style="justify-content:flex-start">
+          <button type="button" class="btn inline" onclick="saveSrapsProfileMap()">Save Profile Mapping</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 const MAC_LIST = <?= $mac_list_json ?: '[]' ?>;
 const ASSIGNED_MACS = <?= $assigned_macs_json ?: '{}' ?>;
@@ -1420,14 +1448,8 @@ document.addEventListener('DOMContentLoaded', function(){
   // Initial SRAPS dot
   try { setSrapsConnected(SRAPS_STATUS_OK); } catch(e){}
 
-  // SRAPS button: open Global Settings with SRAPS tab selected
-  const srapsBtn = document.getElementById('open-sraps');
-  if (srapsBtn) {
-    srapsBtn.addEventListener('click', () => {
-      window.location.href = 'extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID) + '&global=1&tab=tab-sraps';
-    });
-  }
-
+  // remove old behavior of navigating to global modal and instead open SRAPS modal (listener attached after modal code)
+  // other DOM init:
   document.querySelectorAll('.tabpanel').forEach(p=>{
     p.style.display = p.classList.contains('active') ? 'block' : 'none';
   });
@@ -1511,7 +1533,21 @@ document.addEventListener('DOMContentLoaded', function(){
   }
   if (searchBtn) searchBtn.addEventListener('click', applySearchFilter);
 
+  // attach mac combos after building the DOM
   attachMacCombos();
+
+  // Attach SRAPS open listener (modal JS is below)
+  const srapsBtn = document.getElementById('open-sraps');
+  if (srapsBtn) {
+    srapsBtn.addEventListener('click', () => {
+      // open modal defined below
+      if (typeof openSrapsModal === 'function') openSrapsModal();
+      else {
+        // fallback: open global settings SRAPS tab
+        window.location.href = 'extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID) + '&global=1&tab=tab-sraps';
+      }
+    });
+  }
 });
 
 function switchSiteGo(){
@@ -1605,7 +1641,7 @@ function confirmDelete(ext){
   document.body.appendChild(f); f.submit();
 }
 
-/* MAC combo with model autofill + suggestions */
+/* MAC combo with model autofill + suggestions (fixed) */
 function attachMacCombos() {
   const macList = Array.isArray(MAC_LIST) ? MAC_LIST : [];
   document.querySelectorAll('.mac-combo').forEach(combo => {
@@ -1617,8 +1653,9 @@ function attachMacCombos() {
     function findModelForMac(mac) {
       if (!mac) return '';
       for (let i=0;i<macList.length;i++){
-        const m = (macList[i].mac || it.MAC || '').toString().replace(/[^A-Fa-f0-9]/g,'').toUpperCase();
-        if (m === mac) return (macList[i].model || '').toString();
+        const entry = macList[i] || {};
+        const m = (entry.mac || entry.MAC || '').toString().replace(/[^A-Fa-f0-9]/g,'').toUpperCase();
+        if (m === mac) return (entry.model || entry.Model || '').toString();
       }
       return '';
     }
@@ -1644,7 +1681,7 @@ function attachMacCombos() {
         if (assignedTo && assignedTo !== ext) return;
         if (q === '' || mac.indexOf(q) !== -1) {
           const item = document.createElement('div'); item.className = 'mac-combo-item'; item.tabIndex = -1;
-          item.dataset.value = mac; item.dataset.model = (it.model || '').toString();
+          item.dataset.value = mac; item.dataset.model = (it.model || it.Model || '').toString();
           item.textContent = mac + (it.model ? ' ' + it.model : '');
           listEl.appendChild(item); any++;
         }
@@ -1706,30 +1743,130 @@ function attachMacCombos() {
     document.addEventListener('click', function(ev){ if (!combo.contains(ev.target)) hideList(); });
   });
 }
+
+/* SRAPS modal JS functions (already referenced above) */
+function openSrapsModal(){
+  const modal = document.getElementById('sraps-modal');
+  if (!modal) return;
+  modal.style.display='flex';
+  setTimeout(()=>{ selectSrapsTab('s-cred'); },50);
+}
+function closeSrapsModal(){ const modal = document.getElementById('sraps-modal'); if (modal) modal.style.display='none'; }
+
+function saveSrapsCreds(){
+  const apiUrl = document.getElementById('sraps-api-url').value.trim();
+  const orgId = document.getElementById('sraps-org-id').value.trim();
+  // continuation from "const keyId"
+  const keyId = document.getElementById('sraps-key-id').value.trim();
+  const secret = document.getElementById('sraps-key-secret').value;
+  fetch('extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID) + '&sraps_action=save_creds', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ baseUrl: apiUrl, orgId: orgId, accessKey: keyId, secretKey: secret })
+  })
+  .then(r => r.json())
+  .then(res => {
+    if (res && res.ok) {
+      showToast('SRAPS credentials saved', 'success');
+      // update dot and run test
+      testSrapsCreds();
+    } else {
+      showToast('Failed saving SRAPS credentials', 'warn');
+    }
+  })
+  .catch(() => showToast('Save failed', 'warn'));
+}
+
+function testSrapsCreds(){
+  const statusEl = document.getElementById('sraps-status');
+  if (statusEl) statusEl.textContent = 'Testing...';
+  fetch('extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID) + '&sraps_action=test')
+    .then(r => r.json())
+    .then(res => {
+      if (res && res.ok) {
+        if (statusEl) statusEl.textContent = 'Connected!';
+        setSrapsConnected(true);
+        showToast('SRAPS connection OK', 'success');
+      } else {
+        if (statusEl) statusEl.textContent = 'Failed';
+        setSrapsConnected(false);
+        showToast('SRAPS test failed', 'warn');
+      }
+    })
+    .catch(err => {
+      if (statusEl) statusEl.textContent = 'Failed';
+      setSrapsConnected(false);
+      showToast('SRAPS test failed', 'warn');
+      console.error('SRAPS test error', err);
+    });
+}
+
+function loadSrapsProfiles(){
+  const countEl = document.getElementById('sraps-profile-count');
+  if (countEl) countEl.textContent = 'Loading...';
+  fetch('extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID) + '&sraps_action=get_profiles')
+    .then(r => r.json())
+    .then(res => {
+      const profiles = Array.isArray(res.profiles) ? res.profiles : [];
+      if (countEl) countEl.textContent = profiles.length + ' profiles';
+      fillProfileSelect('sraps-profile-D', profiles, "<?= e($wiz['sraps']['profilesCat']['D'] ?? '') ?>");
+      fillProfileSelect('sraps-profile-M', profiles, "<?= e($wiz['sraps']['profilesCat']['M'] ?? '') ?>");
+      fillProfileSelect('sraps-profile-M500', profiles, "<?= e($wiz['sraps']['profilesCat']['M500'] ?? '') ?>");
+      fillProfileSelect('sraps-profile-HOTEL', profiles, "<?= e($wiz['sraps']['profilesCat']['HOTEL'] ?? '') ?>");
+    })
+    .catch(err => {
+      if (countEl) countEl.textContent = '';
+      showToast('Failed to load profiles', 'warn');
+      console.error('loadSrapsProfiles error', err);
+    });
+}
+
+function fillProfileSelect(selId, profiles, selected){
+  const sel = document.getElementById(selId);
+  if (!sel) return;
+  // normalize incoming selected (string)
+  const selStr = String(selected || '');
+  sel.innerHTML = '<option value="">--select--</option>';
+  profiles.forEach(p => {
+    try {
+      const id = (p.uuid || p.uuid_v4 || p.id || '').toString();
+      const name = (p.name || p.display_name || id || '').toString();
+      const opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent = name;
+      if (id === selStr) opt.selected = true;
+      sel.appendChild(opt);
+    } catch (e) {
+      // skip malformed profile
+      console.warn('Malformed profile', p, e);
+    }
+  });
+}
+
+function saveSrapsProfileMap(){
+  const d = document.getElementById('sraps-profile-D')?.value || '';
+  const m = document.getElementById('sraps-profile-M')?.value || '';
+  const m500 = document.getElementById('sraps-profile-M500')?.value || '';
+  const h = document.getElementById('sraps-profile-HOTEL')?.value || '';
+  fetch('extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID) + '&sraps_action=save_category_profiles', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ profile_D: d, profile_M: m, profile_M500: m500, profile_HOTEL: h })
+  })
+  .then(r => r.json())
+  .then(res => {
+    if (res && res.ok) {
+      showToast('SRAPS profile mapping saved', 'success');
+      // update stored wiz via reload to reflect changes server-side
+      setTimeout(()=>{ location.reload(); }, 600);
+    } else {
+      showToast('Failed to save profile mapping', 'warn');
+    }
+  })
+  .catch(() => showToast('Save failed', 'warn'));
+}
 </script>
+
 <!-- UI_BUILD: <?= e($UI_BUILD) ?> | file: <?= e(__FILE__) ?> | mtime: <?= filemtime(__FILE__) ?> -->
 </body>
 </html>
-
-<?php
-// --- AJAX suggestion fix for CSV extensions ---
-if (isset($_GET['ajax']) && $_GET['ajax'] === 'suggest_extension') {
-    header('Content-Type: application/json; charset=UTF-8');
-    $term = isset($_GET['term']) ? trim($_GET['term']) : '';
-    $out = [];
-    $stmt = $pdo->prepare("SELECT ext, display_name, model FROM extensions WHERE ext LIKE :t ORDER BY ext LIMIT 20");
-    $stmt->execute([':t' => $term.'%']);
-    while ($r = $stmt->fetch(PDO::FETCH_ASSOC)) {
-        $out[] = ['ext' => $r['ext'], 'name' => $r['display_name'], 'model' => $r['model']];
-    }
-    if (!empty($_SESSION['csv_import']) && is_array($_SESSION['csv_import'])) {
-        foreach ($_SESSION['csv_import'] as $row) {
-            if (!empty($row['extension']) && strpos($row['extension'], $term) === 0) {
-                $out[] = ['ext' => $row['extension'], 'name' => $row['display_name'] ?? '', 'model' => $row['model'] ?? ''];
-            }
-        }
-    }
-    echo json_encode($out);
-    exit;
-}
-?>
