@@ -3,7 +3,7 @@ ini_set('display_errors', 0);
 error_reporting(E_ALL);
 session_start();
 
-$UI_BUILD = '2025-10-26 v12.1: SRAPS dot, VLAN priority fields, 4s toasts, admin pass no symbols';
+$UI_BUILD = '2025-10-26 v12: SRAPS links+Global settings fixes';
 header('X-UI-Build: '.$UI_BUILD);
 
 ini_set('default_charset', 'UTF-8');
@@ -40,14 +40,6 @@ function is_valid_mac(string $s): bool { $m = normalize_mac($s); return ($m !== 
 function random_password($len = 16) {
     if ($len < 1) $len = 16;
     $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%&*()-_=+[]{}?,.:;~';
-    $out = ''; $max = strlen($chars)-1;
-    for ($i=0;$i<$len;$i++) $out .= $chars[random_int(0,$max)];
-    return $out;
-}
-function random_password_no_symbols($len = 16) {
-    if ($len < 1) $len = 16;
-    // letters + digits only (no special characters)
-    $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
     $out = ''; $max = strlen($chars)-1;
     for ($i=0;$i<$len;$i++) $out .= $chars[random_int(0,$max)];
     return $out;
@@ -140,12 +132,15 @@ if ($PUBLIC_PROVISION_PATH === '') $PUBLIC_PROVISION_PATH = '/provisioning_files
 
 /* Session wizard state */
 if (!isset($_SESSION['wiz'])) $_SESSION['wiz'] = [];
-if (!isset($_SESSION['wiz'][$sysId])) {
-    $_SESSION['wiz'][$sysId] = [
-        'exts'=>[],'assign'=>[],'settings'=>[],'generated'=>[],'global'=>[],'flash'=>null,
-        'sraps'=>['statusOK'=>false,'statusAt'=>'']
-    ];
-}
+if (!isset($_SESSION['wiz'][$sysId])) $_SESSION['wiz'][$sysId] = [
+    'exts'=>[],'assign'=>[],'settings'=>[],'generated'=>[],'global'=>[],'flash'=>null,
+    'sraps'=>[
+        'baseUrl'=>'https://api.sraps.snom.com/api/v1/',
+        'orgId'=>'','accessKey'=>'','secretKey'=>'',
+        'statusOK'=>false,'statusAt'=>'',
+        'profilesCat'=>['D'=>'','M'=>'','M500'=>'','HOTEL'=>'']
+    ]
+];
 $wiz = &$_SESSION['wiz'][$sysId];
 if ($db_wiz = load_wiz_from_db($pdo, $sysId, $uid)) { $_SESSION['wiz'][$sysId] = array_replace_recursive($wiz, $db_wiz); $wiz = &$_SESSION['wiz'][$sysId]; }
 
@@ -283,8 +278,7 @@ function write_profile($dir, $ucm_host, $extInfo, $mac, $overrides = [], $all_ex
     $fullname_map = [];
     foreach ($all_exts as $ae) { $fullname_map[(string)$ae['extension']] = sanitize_for_ui($ae['fullname'] ?? ''); }
 
-    // Admin password without special characters; user password may keep symbols
-    $admin_pass = isset($overrides['http_pass']) && $overrides['http_pass'] !== '' ? (string)$overrides['http_pass'] : random_password_no_symbols(16);
+    $admin_pass = isset($overrides['http_pass']) && $overrides['http_pass'] !== '' ? (string)$overrides['http_pass'] : random_password(16);
     $user_pass  = isset($overrides['user_http_pass']) && $overrides['user_http_pass'] !== '' ? (string)$overrides['user_http_pass'] : random_password(16);
 
     if (($overrides['force_admin_password'] ?? '') === 'on' && !empty($overrides['forced_admin_password'])) {
@@ -301,12 +295,6 @@ function write_profile($dir, $ucm_host, $extInfo, $mac, $overrides = [], $all_ex
 
     $lan_vlan = (string)($overrides['net_vlan_lan'] ?? ($overrides['net_vlan_voice'] ?? ''));
     $pc_vlan  = (string)($overrides['net_vlan_pc'] ?? '');
-
-    // VLAN priority 0..7
-    $vlan_pc_pri = isset($overrides['vlan_pc_priority']) ? (int)$overrides['vlan_pc_priority'] : null;
-    if ($vlan_pc_pri !== null) { if ($vlan_pc_pri < 0) $vlan_pc_pri = 0; if ($vlan_pc_pri > 7) $vlan_pc_pri = 7; }
-    $vlan_qos = isset($overrides['vlan_qos']) ? (int)$overrides['vlan_qos'] : null;
-    if ($vlan_qos !== null) { if ($vlan_qos < 0) $vlan_qos = 0; if ($vlan_qos > 7) $vlan_qos = 7; }
 
     $transport = strtolower((string)($overrides['sec_sip_transport'] ?? 'udp'));
     $user_host_value = $sip_server;
@@ -327,8 +315,8 @@ function write_profile($dir, $ucm_host, $extInfo, $mac, $overrides = [], $all_ex
     $tbook_url = (string)($overrides['contacts_tbook_url'] ?? '');
 
     $xml  = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-    $xml .= "<settings>\n";
 
+    $xml .= "<settings>\n";
     $xml .= "  <phone-settings e=\"2\">\n";
 
     $xml .= "    <user_active idx=\"1\" perm=\"RW\">on</user_active>\n";
@@ -368,13 +356,6 @@ function write_profile($dir, $ucm_host, $extInfo, $mac, $overrides = [], $all_ex
     if ($pc_vlan !== '') {
         $xml .= "    <pc_port_vlan_id perm=\"RW\">".htmlspecialchars(preg_replace('/\D/','',(string)$pc_vlan), ENT_QUOTES, 'UTF-8')."</pc_port_vlan_id>\n";
         $xml .= "    <pc_port_tagging perm=\"RW\">on</pc_port_tagging>\n";
-    }
-    // VLAN priority tags as requested
-    if ($vlan_pc_pri !== null) {
-        $xml .= "    <vlan_pc_priority perm=\"RW\">".$vlan_pc_pri."</vlan_pc_priority>\n";
-    }
-    if ($vlan_qos !== null) {
-        $xml .= "    <vlan_qos perm=\"RW\">".$vlan_qos."</vlan_qos>\n";
     }
 
     if (!empty($overrides['loc_lcd_language'])) {
@@ -417,7 +398,7 @@ function write_profile($dir, $ucm_host, $extInfo, $mac, $overrides = [], $all_ex
     if (isset($overrides['prov_polling_period'])) {
         $period = (int)$overrides['prov_polling_period'];
         if ($period < 0) $period = 0;
-               if ($period > 3600) $period = 3600;
+        if ($period > 3600) $period = 3600;
         if ($period > 0) {
             $xml .= "    <prov_polling_enabled perm=\"RW\">on</prov_polling_enabled>\n";
             $xml .= "    <prov_polling_mode perm=\"RW\">rel</prov_polling_mode>\n";
@@ -519,6 +500,268 @@ function merge_assign_into_session(array $postedAssign, array &$wiz, string &$er
     return true;
 }
 
+/* ---------- SRAPS helpers: Hawk signing + request + robust links ---------- */
+function canonical_content_type(string $contentType): string {
+    if ($contentType === '') return '';
+    $base = explode(';', $contentType, 2)[0];
+    return strtolower(trim($base));
+}
+function hawk_payload_hash(string $payload, string $contentType, string $algorithm = 'sha256'): string {
+    $normalized = "hawk.1.payload\n" . canonical_content_type($contentType) . "\n" . $payload . "\n";
+    $digest = hash($algorithm, $normalized, true);
+    return base64_encode($digest);
+}
+function hawk_header(string $id, string $key, string $method, string $url, ?string $payload = null, string $contentType = 'application/json', string $algorithm = 'sha256'): string {
+    $parts = parse_url($url);
+    if (!$parts) throw new RuntimeException("Invalid URL for Hawk signing: {$url}");
+    $host = $parts['host'] ?? '';
+    $scheme = strtolower($parts['scheme'] ?? 'https');
+    $port = $parts['port'] ?? ($scheme === 'https' ? 443 : 80);
+    $path = $parts['path'] ?? '/';
+    $query = isset($parts['query']) ? ('?' . $parts['query']) : '';
+    $requestUri = $path . $query;
+    $ts = (string) time();
+    $nonce = bin2hex(random_bytes(6));
+    $hash = null;
+    if ($payload !== null && $payload !== '') $hash = hawk_payload_hash($payload, $contentType, $algorithm);
+    $normalized = "hawk.1.header\n{$ts}\n{$nonce}\n".strtoupper($method)."\n{$requestUri}\n{$host}\n{$port}\n".($hash ?? '')."\n\n";
+    $mac = base64_encode(hash_hmac($algorithm, $normalized, $key, true));
+    $attrs = ['id'=>$id,'ts'=>$ts,'nonce'=>$nonce,'mac'=>$mac];
+    if ($hash !== null) $attrs['hash'] = $hash;
+    $pairs = []; foreach ($attrs as $k=>$v) $pairs[] = $k.'="'.str_replace(['\\','"'],['\\\\','\\"'],$v).'"';
+    return 'Hawk ' . implode(', ', $pairs);
+}
+function sraps_request(string $method, string $url, string $accessId, string $secretKey, ?array $body = null): array {
+    $payload = null; $contentType = 'application/json';
+    if ($body !== null) $payload = json_encode($body, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    $auth = hawk_header($accessId, $secretKey, $method, $url, $payload, $contentType);
+    $headersOut = ['Authorization: '.$auth, 'Accept: application/json', 'User-Agent: SRAPS-PHP-Client/1.0'];
+    if ($payload !== null) $headersOut[] = 'Content-Type: '.$contentType;
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, strtoupper($method));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headersOut);
+    curl_setopt($ch, CURLOPT_HEADER, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
+    if ($payload !== null) curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+    $raw = curl_exec($ch);
+    $errno = curl_errno($ch);
+    $error = curl_error($ch);
+    $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    curl_close($ch);
+    if ($errno !== 0) throw new RuntimeException("Network error: {$error}");
+    $decoded = null;
+    if (is_string($raw) && $raw !== '') {
+        $maybe = json_decode($raw, true);
+        if (json_last_error() === JSON_ERROR_NONE) $decoded = $maybe;
+    }
+    if ($status < 200 || $status >= 300) {
+        $msg = is_string($raw) ? $raw : '';
+        throw new RuntimeException("SRAPS {$method} failed ({$status}): {$msg}");
+    }
+    return ['status'=>$status, 'data'=>$decoded !== null ? $decoded : $raw];
+}
+function sraps_company_url(array $conf): string {
+    return rtrim($conf['baseUrl'] ?? 'https://api.sraps.snom.com/api/v1/', '/') . '/companies/' . rawurlencode((string)($conf['orgId'] ?? ''));
+}
+function sraps_test_connection(array &$wiz_sraps): array {
+    $url = sraps_company_url($wiz_sraps);
+    $resp = sraps_request('GET', $url, (string)$wiz_sraps['accessKey'], (string)$wiz_sraps['secretKey'], null);
+    $wiz_sraps['statusOK'] = true; $wiz_sraps['statusAt'] = date('c');
+    return $resp;
+}
+function sraps_pick_category(string $model): string {
+    $up = strtoupper(trim($model));
+    if (strpos($up, 'M500') === 0) return 'M500';
+    if (strpos($up, 'M') === 0) return 'M';
+    if (strpos($up, 'HOTEL') === 0) return 'HOTEL';
+    return 'D';
+}
+function sraps_assign_device(array $wiz_sraps, string $macUpper, string $model, string $name = '', ?string $profileOverride = null): array {
+    $mac = strtolower($macUpper);
+    $profile = $profileOverride;
+    if (!$profile) {
+        $cat = sraps_pick_category($model);
+        $profile = (string)($wiz_sraps['profilesCat'][$cat] ?? '');
+        if ($profile === '') throw new RuntimeException("No SRAPS profile mapped for category {$cat}");
+    }
+    $endpointUrl = rtrim($wiz_sraps['baseUrl'], '/') . '/companies/' . rawurlencode((string)$wiz_sraps['orgId']) . '/endpoints/' . rawurlencode($mac);
+    $payload = ['mac'=>$mac, 'autoprovisioning_enabled'=>true, 'provisioning_profile'=>$profile];
+    if ($name !== '') $payload['name'] = $name;
+    $resp = sraps_request('PUT', $endpointUrl, (string)$wiz_sraps['accessKey'], (string)$wiz_sraps['secretKey'], $payload);
+    return $resp;
+}
+
+/* Robust profile list resolution */
+function sraps_resolve_profiles_url(array $companyData, array $wiz_sraps): string {
+    // Accept common shapes:
+    // 1) links is an associative array with various key styles
+    // 2) links is an array of {rel, href}
+    $links = $companyData['links'] ?? null;
+    $candidates = [];
+    if (is_array($links)) {
+        // Associative style
+        foreach (['provisioning-profiles','provisioning_profiles','provisioningProfiles'] as $k) {
+            if (isset($links[$k]) && is_string($links[$k]) && $links[$k] !== '') {
+                $candidates[] = $links[$k];
+            }
+        }
+        // Array of link objects
+        if (array_keys($links) === range(0, count($links)-1)) {
+            foreach ($links as $lnk) {
+                if (is_array($lnk)) {
+                    $rel = strtolower((string)($lnk['rel'] ?? ''));
+                    $href = (string)($lnk['href'] ?? '');
+                    if ($href && (strpos($rel, 'provision') !== false && strpos($rel, 'profile') !== false)) {
+                        $candidates[] = $href;
+                    }
+                }
+            }
+        }
+        // Any string value ending with /provisioning-profiles
+        foreach ($links as $k=>$v) {
+            if (is_string($v) && preg_match('#/provisioning-?profiles/?$#i', $v)) $candidates[] = $v;
+        }
+    }
+    foreach ($candidates as $u) {
+        if (is_string($u) && $u !== '') return $u;
+    }
+    // Fallback
+    return rtrim($wiz_sraps['baseUrl'] ?? 'https://api.sraps.snom.com/api/v1/', '/') . '/companies/' . rawurlencode((string)($wiz_sraps['orgId'] ?? '')) . '/provisioning-profiles/';
+}
+function sraps_next_url($data): ?string {
+    // Try common shapes for "next" pagination URL
+    if (is_array($data)) {
+        if (isset($data['next']) && is_string($data['next']) && $data['next'] !== '') return $data['next'];
+        if (isset($data['links']['next']) && is_string($data['links']['next']) && $data['links']['next'] !== '') return $data['links']['next'];
+        if (isset($data['next_page']) && is_string($data['next_page']) && $data['next_page'] !== '') return $data['next_page'];
+    }
+    return null;
+}
+function sraps_fetch_profiles(array $wiz_sraps): array {
+    // 1) Get company to resolve link
+    $compResp = sraps_request('GET', sraps_company_url($wiz_sraps), (string)$wiz_sraps['accessKey'], (string)$wiz_sraps['secretKey']);
+    $company = is_array($compResp['data']) ? $compResp['data'] : [];
+    $ppUrl = sraps_resolve_profiles_url($company, $wiz_sraps);
+    // 2) Walk pages
+    $out = []; $next = $ppUrl; $guard = 50;
+    while ($next && $guard-- > 0) {
+        $page = sraps_request('GET', $next, (string)$wiz_sraps['accessKey'], (string)$wiz_sraps['secretKey']);
+        $data = $page['data'];
+        if (isset($data['results']) && is_array($data['results'])) {
+            $out = array_merge($out, $data['results']);
+            $next = sraps_next_url($data);
+        } elseif (is_array($data) && array_keys($data) === range(0, count($data)-1)) {
+            $out = array_merge($out, $data);
+            $next = null;
+        } elseif (isset($data['items']) && is_array($data['items'])) {
+            $out = array_merge($out, $data['items']);
+            $next = sraps_next_url($data);
+        } else {
+            // Single object or unknown shape — push and stop
+            $out[] = $data;
+            $next = null;
+        }
+    }
+    // Normalize minimal fields
+    $norm = [];
+    foreach ($out as $p) {
+        if (!is_array($p)) continue;
+        $uuid = (string)($p['uuid'] ?? ($p['uuid_v4'] ?? ($p['id'] ?? '')));
+        $name = (string)($p['name'] ?? ($p['display_name'] ?? $uuid));
+        if ($uuid !== '') $norm[] = ['uuid'=>$uuid, 'name'=>$name] + $p;
+    }
+    return $norm;
+}
+
+/* SRAPS AJAX entrypoint (inside this same file) */
+if (isset($_GET['sraps_action'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    $act = (string)$_GET['sraps_action'];
+    $out = null; $code = 200;
+    try {
+        if ($act === 'status') {
+            $out = [
+                'configured' => ($wiz['sraps']['baseUrl'] ?? '') !== '' && ($wiz['sraps']['orgId'] ?? '') !== '' && ($wiz['sraps']['accessKey'] ?? '') !== '' && ($wiz['sraps']['secretKey'] ?? '') !== '',
+                'statusOK'   => (bool)($wiz['sraps']['statusOK'] ?? false),
+                'statusAt'   => (string)($wiz['sraps']['statusAt'] ?? ''),
+                'baseUrl'    => (string)($wiz['sraps']['baseUrl'] ?? 'https://api.sraps.snom.com/api/v1/'),
+                'profilesCat'=> (array)($wiz['sraps']['profilesCat'] ?? ['D'=>'','M'=>'','M500'=>'','HOTEL'=>'']),
+            ];
+        } elseif ($act === 'save_creds' && $_SERVER['REQUEST_METHOD']==='POST') {
+            $raw = file_get_contents('php://input') ?: '';
+            $in = json_decode($raw, true) ?: [];
+            $base = rtrim((string)($in['baseUrl'] ?? 'https://api.sraps.snom.com/api/v1/'), '/') . '/';
+            $org  = trim((string)($in['orgId'] ?? ''));
+            $id   = trim((string)($in['accessKey'] ?? ''));
+            $secret = isset($in['secretKey']) ? (string)$in['secretKey'] : null;
+
+            // preserve secret when user sends sentinel '********' or omits field
+            if ($secret === '********' || $secret === null) {
+                $secretToStore = $wiz['sraps']['secretKey'] ?? '';
+            } else {
+                $secretToStore = $secret;
+            }
+
+            $wiz['sraps']['baseUrl'] = $base;
+            $wiz['sraps']['orgId'] = $org;
+            $wiz['sraps']['accessKey'] = $id;
+            $wiz['sraps']['secretKey'] = $secretToStore;
+            $wiz['sraps']['statusOK'] = false;
+            $wiz['sraps']['statusAt'] = '';
+            save_wiz_to_db($pdo,$sysId,$uid,$wiz);
+            $out = ['ok'=>true];
+        } elseif ($act === 'test') {
+            $conf = $wiz['sraps'];
+            if (($conf['baseUrl'] ?? '') === '' || ($conf['orgId'] ?? '') === '' || ($conf['accessKey'] ?? '') === '' || ($conf['secretKey'] ?? '') === '') {
+                throw new RuntimeException('Missing SRAPS credentials');
+            }
+            try {
+                $resp = sraps_test_connection($wiz['sraps']);
+                save_wiz_to_db($pdo,$sysId,$uid,$wiz);
+                $out = ['ok'=>true,'company'=>$resp['data']];
+            } catch (Throwable $e) {
+                $wiz['sraps']['statusOK'] = false; $wiz['sraps']['statusAt'] = date('c');
+                save_wiz_to_db($pdo,$sysId,$uid,$wiz);
+                throw $e;
+            }
+        } elseif ($act === 'get_profiles') {
+            $profiles = sraps_fetch_profiles($wiz['sraps']);
+            $out = ['profiles'=>$profiles];
+        } elseif ($act === 'save_category_profiles' && $_SERVER['REQUEST_METHOD']==='POST') {
+            $raw = file_get_contents('php://input') ?: '';
+            $in = json_decode($raw, true) ?: [];
+            $wiz['sraps']['profilesCat'] = [
+                'D'     => (string)($in['profile_D'] ?? ''),
+                'M'     => (string)($in['profile_M'] ?? ''),
+                'M500'  => (string)($in['profile_M500'] ?? ''),
+                'HOTEL' => (string)($in['profile_HOTEL'] ?? ''),
+            ];
+            save_wiz_to_db($pdo,$sysId,$uid,$wiz);
+            $out = ['ok'=>true,'saved'=>$wiz['sraps']['profilesCat']];
+        } elseif ($act === 'assign' && $_SERVER['REQUEST_METHOD']==='POST') {
+            $raw = file_get_contents('php://input') ?: '';
+            $in = json_decode($raw, true) ?: [];
+            $mac = strtoupper(preg_replace('/[^A-Fa-f0-9]/','', (string)($in['mac'] ?? '')));
+            $model = (string)($in['model'] ?? '');
+            $name  = (string)($in['name'] ?? '');
+            $prof  = isset($in['profileOverride']) ? (string)$in['profileOverride'] : null;
+            if ($mac === '' || strlen($mac)!==12) throw new RuntimeException('mac must be 12 hex characters');
+            $resp = sraps_assign_device($wiz['sraps'], $mac, $model, $name, $prof);
+            $out = ['ok'=>true,'endpoint'=>$resp['data']];
+        } else {
+            $code = 400; $out = ['error'=>'Unknown action'];
+        }
+    } catch (Throwable $e) {
+        $code = 500; $out = ['error'=>$e->getMessage()];
+    }
+    http_response_code($code);
+    echo json_encode($out, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 /* POST handlers */
 if (isset($wiz['edit_ext'])) unset($wiz['edit_ext']);
 
@@ -537,23 +780,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign']) && is_array
     header('Location: extensions.php?system_id=' . (int)$sysId); exit;
 }
 
-/* Global Settings save (add SRAPS toggles + keep defaults) */
+/* Global Settings save - persist SRAPS flags and creds */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_global'])) {
     $incoming = (array)($_POST['global'] ?? []);
     $wiz['global'] = array_replace($wiz['global'], $incoming);
 
-    // Booleans/toggles
+    // force_admin_password toggle may be present on Security tab
     if (!isset($incoming['force_admin_password'])) {
         $wiz['global']['force_admin_password'] = 'off';
     }
+    // SRAPS flags
     if (!isset($incoming['use_sraps'])) {
         $wiz['global']['use_sraps'] = 'off';
     }
     if (!isset($incoming['sraps_push_on_generate'])) {
-        $wiz['global']['sraps_push_on_generate'] = 'on'; // default on
+        $wiz['global']['sraps_push_on_generate'] = 'on'; // default to on
     }
 
-    // Defaults and clamps
+    // SRAPS creds from Global panel (preserve secret if masked)
+    $org = trim((string)($incoming['sraps_org'] ?? ''));
+    $keyid = trim((string)($incoming['sraps_keyid'] ?? ''));
+    $secret = array_key_exists('sraps_secret', $incoming) ? (string)$incoming['sraps_secret'] : null;
+    if ($org !== '') $wiz['sraps']['orgId'] = $org;
+    if ($keyid !== '') $wiz['sraps']['accessKey'] = $keyid;
+    if ($secret !== null && $secret !== '' && $secret !== '********') $wiz['sraps']['secretKey'] = $secret;
+
+    // Defaults and clamping
     if (empty($wiz['global']['setting_server'])) {
         $wiz['global']['setting_server'] = 'v2.6.1c/provisioning_files';
     }
@@ -572,11 +824,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_global'])) {
     header('Location: extensions.php?system_id=' . (int)$sysId . '&global=1'); exit;
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit'])) {
-    $ext = (string)$_POST['edit'];
-    header('Location: extensions.php?system_id=' . (int)$sysId . '&edit=' . urlencode($ext)); exit;
-}
-
 /* Save per-extension settings */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_settings']) && isset($_POST['ext'])) {
     $ext = (string)$_POST['ext'];
@@ -585,7 +832,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_settings']) && i
     if (isset($_POST['cfg_http_pass_real']) && trim((string)$_POST['cfg_http_pass_real']) !== '') {
         $settings['http_pass'] = trim((string)$_POST['cfg_http_pass_real']);
     } elseif (empty($settings['http_pass'])) {
-        $settings['http_pass'] = random_password_no_symbols(16);
+        $settings['http_pass'] = random_password(16);
     }
 
     if (isset($_POST['cfg_user_http_pass']) && trim((string)$_POST['cfg_user_http_pass']) !== '') {
@@ -622,7 +869,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_settings']) && i
     header('Location: extensions.php?system_id='.(int)$sysId.'&edit='.urlencode($ext)); exit;
 }
 
-/* Generate one */
+/* Generate one - optionally push to SRAPS */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_one']) && $_POST['generate_one']!=='') {
     if (isset($_POST['assign']) && is_array($_POST['assign'])) { $err=''; if (!merge_assign_into_session($_POST['assign'], $wiz, $err)) { $wiz['flash']=['msg'=>$err,'type'=>'warn']; save_wiz_to_db($pdo,$sysId,$uid,$wiz); header('Location: extensions.php?system_id='.(int)$sysId); exit; } save_wiz_to_db($pdo,$sysId,$uid,$wiz); }
     $ext=(string)$_POST['generate_one']; $found=null; foreach($exts as $e) if((string)$e['extension']===$ext){ $found=$e; break; }
@@ -631,7 +878,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_one']) && $_
     if ($mac===''){ $wiz['flash']=['msg'=>"No MAC assigned for {$ext}.",'type'=>'warn']; save_wiz_to_db($pdo,$sysId,$uid,$wiz); header('Location: extensions.php?system_id='.(int)$sysId); exit; }
     if (!is_valid_mac($mac)) { $wiz['flash']=['msg'=>"Invalid MAC for {$ext}. Expect 12 hex characters (0-9,A-F).",'type'=>'warn']; save_wiz_to_db($pdo,$sysId,$uid,$wiz); header('Location: extensions.php?system_id='.(int)$sysId); exit; }
     $over = $wiz['settings'][$ext] ?? [];
-    if (empty($over['http_pass'])) { $over['http_pass'] = random_password_no_symbols(16); $wiz['settings'][$ext]['http_pass'] = $over['http_pass']; }
+    if (empty($over['http_pass'])) { $over['http_pass'] = random_password(16); $wiz['settings'][$ext]['http_pass'] = $over['http_pass']; }
     if (empty($over['user_http_pass'])) { $over['user_http_pass'] = random_password(16); $wiz['settings'][$ext]['user_http_pass'] = $over['user_http_pass']; }
     $over['__model'] = $wiz['assign'][$ext]['model'] ?? '';
     $global = $wiz['global'] ?? [];
@@ -639,15 +886,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_one']) && $_
     if (empty($merged['setting_server'])) $merged['setting_server'] = 'v2.6.1c/provisioning_files';
     $oldfile = rtrim($PROVISION_DIR,'/')."/{$mac}.xml"; if (file_exists($oldfile)) @unlink($oldfile);
     [$ok,$res] = write_profile($PROVISION_DIR, $sys['host'], $found, $mac, $merged, $exts);
-    if ($ok) { $wiz['generated'][$ext]=['mac'=>$res,'url'=>$PUBLIC_PROVISION_PATH.'/'.$res.'.xml','created'=>date('c')]; $wiz['flash']=['msg'=>"Generated profile for {$ext}.",'type'=>'success']; }
-    else { $wiz['flash']=['msg'=>"Failed generating {$ext}: {$res}",'type'=>'warn']; }
+
+    $msgParts=[]; $type='success';
+    if ($ok) {
+        $wiz['generated'][$ext]=['mac'=>$res,'url'=>$PUBLIC_PROVISION_PATH.'/'.$res.'.xml','created'=>date('c')];
+        $msgParts[] = "Generated profile for {$ext}.";
+        $useSRAPS = (($wiz['global']['use_sraps'] ?? 'off') === 'on');
+        $pushOnGen = (($wiz['global']['sraps_push_on_generate'] ?? 'on') === 'on');
+        if ($useSRAPS && $pushOnGen && !empty($wiz['sraps']['statusOK'])) {
+            try {
+                $model = (string)($wiz['assign'][$ext]['model'] ?? '');
+                $name  = (string)($found['fullname'] ?? '');
+                sraps_assign_device($wiz['sraps'], $res, $model, $name, null);
+                $msgParts[] = "SRAPS: device assigned";
+            } catch (Throwable $se) {
+                $msgParts[] = "SRAPS failed: ".$se->getMessage();
+                $type='warn';
+            }
+        }
+    } else {
+        $msgParts[] = "Failed generating {$ext}: {$res}";
+        $type='warn';
+    }
+    $wiz['flash']=['msg'=>implode(' ', $msgParts),'type'=>$type];
     save_wiz_to_db($pdo,$sysId,$uid,$wiz); header('Location: extensions.php?system_id='.(int)$sysId); exit;
 }
 
-/* Generate selected */
+/* Generate selected (bulk) */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_selected']) && is_array($_POST['generate_selected'])) {
     if (isset($_POST['assign']) && is_array($_POST['assign'])) { $err=''; if (!merge_assign_into_session($_POST['assign'], $wiz, $err)) { $wiz['flash']=['msg'=>$err,'type'=>'warn']; save_wiz_to_db($pdo,$sysId,$uid,$wiz); header('Location: extensions.php?system_id='.(int)$sysId); exit; } save_wiz_to_db($pdo,$sysId,$uid,$wiz); }
     $selected = $_POST['generate_selected']; $count=0; $errors=[]; $global = $wiz['global'] ?? [];
+    $useSRAPS = (($wiz['global']['use_sraps'] ?? 'off') === 'on');
+    $pushOnGen = (($wiz['global']['sraps_push_on_generate'] ?? 'on') === 'on');
     foreach($selected as $ext) {
         $ext=(string)$ext; $found=null; foreach($exts as $e) if((string)$e['extension']===$ext){ $found=$e; break; }
         if(!$found){ $errors[]="Not found {$ext}"; continue; }
@@ -655,14 +925,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_selected']) 
         if ($mac===''){ $errors[]="No MAC for {$ext}"; continue; }
         if (!is_valid_mac($mac)) { $errors[]="Invalid MAC for {$ext}: must be 12 hex chars (0-9,A-F)"; continue; }
         $over = $wiz['settings'][$ext] ?? [];
-        if (empty($over['http_pass'])) { $over['http_pass'] = random_password_no_symbols(16); $wiz['settings'][$ext]['http_pass'] = $over['http_pass']; }
+        if (empty($over['http_pass'])) { $over['http_pass'] = random_password(16); $wiz['settings'][$ext]['http_pass'] = $over['http_pass']; }
         if (empty($over['user_http_pass'])) { $over['user_http_pass'] = random_password(16); $wiz['settings'][$ext]['user_http_pass'] = $over['user_http_pass']; }
         $over['__model'] = $wiz['assign'][$ext]['model'] ?? '';
         $merged = array_merge($global, $over);
         if (empty($merged['setting_server'])) $merged['setting_server'] = 'v2.6.1c/provisioning_files';
         $oldfile = rtrim($PROVISION_DIR,'/')."/{$mac}.xml"; if (file_exists($oldfile)) @unlink($oldfile);
         [$ok,$res] = write_profile($PROVISION_DIR, $sys['host'], $found, $mac, $merged, $exts);
-        if ($ok) { $wiz['generated'][$ext]=['mac'=>$res,'url'=>$PUBLIC_PROVISION_PATH.'/'.$res.'.xml','created'=>date('c')]; $count++; } else $errors[]="Failed {$ext}: {$res}";
+        if ($ok) {
+            $wiz['generated'][$ext]=['mac'=>$res,'url'=>$PUBLIC_PROVISION_PATH.'/'.$res.'.xml','created'=>date('c')];
+            $count++;
+            if ($useSRAPS && $pushOnGen && !empty($wiz['sraps']['statusOK'])) {
+                try {
+                    sraps_assign_device($wiz['sraps'], $res, ($wiz['assign'][$ext]['model'] ?? ''), ($found['fullname'] ?? ''));
+                } catch (Throwable $se) {
+                    $errors[] = "SRAPS {$ext}: ".$se->getMessage();
+                }
+            }
+        } else $errors[]="Failed {$ext}: {$res}";
     }
     save_wiz_to_db($pdo,$sysId,$uid,$wiz);
     $msg = "Generated {$count} profiles."; if (!empty($errors)) $msg .= ' Errors: '.implode('; ',$errors);
@@ -671,11 +951,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_selected']) 
     header('Location: extensions.php?system_id='.(int)$sysId); exit;
 }
 
-/* Regenerate all existing (already have a generated file) */
+/* Regenerate all existing */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['regenerate_all_existing'])) {
     $existing = array_keys($wiz['generated'] ?? []);
     if (empty($existing)) { $wiz['flash']=['msg'=>'No existing generated files to regenerate.','type'=>'warn']; save_wiz_to_db($pdo,$sysId,$uid,$wiz); header('Location: extensions.php?system_id='.(int)$sysId); exit; }
     $count=0; $errors=[]; $global = $wiz['global'] ?? [];
+    $useSRAPS = (($wiz['global']['use_sraps'] ?? 'off') === 'on');
+    $pushOnGen = (($wiz['global']['sraps_push_on_generate'] ?? 'on') === 'on');
     foreach($existing as $ext) {
         $ext=(string)$ext; $found=null; foreach($exts as $e) if((string)$e['extension']===$ext){ $found=$e; break; }
         if(!$found){ $errors[]="Not found {$ext}"; continue; }
@@ -683,14 +965,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['regenerate_all_existi
         if ($mac===''){ $errors[]="No MAC for {$ext}"; continue; }
         if (!is_valid_mac($mac)) { $errors[]="Invalid MAC for {$ext}"; continue; }
         $over = $wiz['settings'][$ext] ?? [];
-        if (empty($over['http_pass'])) { $over['http_pass'] = random_password_no_symbols(16); $wiz['settings'][$ext]['http_pass'] = $over['http_pass']; }
+        if (empty($over['http_pass'])) { $over['http_pass'] = random_password(16); $wiz['settings'][$ext]['http_pass'] = $over['http_pass']; }
         if (empty($over['user_http_pass'])) { $over['user_http_pass'] = random_password(16); $wiz['settings'][$ext]['user_http_pass'] = $over['user_http_pass']; }
         $over['__model'] = $wiz['assign'][$ext]['model'] ?? '';
         $merged = array_merge($global, $over);
         if (empty($merged['setting_server'])) $merged['setting_server'] = 'v2.6.1c/provisioning_files';
         $oldfile = rtrim($PROVISION_DIR,'/')."/{$mac}.xml"; if (file_exists($oldfile)) @unlink($oldfile);
         [$ok,$res] = write_profile($PROVISION_DIR, $sys['host'], $found, $mac, $merged, $exts);
-        if ($ok) { $wiz['generated'][$ext]=['mac'=>$res,'url'=>$PUBLIC_PROVISION_PATH.'/'.$res.'.xml','created'=>date('c')]; $count++; } else $errors[]="Failed {$ext}: {$res}";
+        if ($ok) {
+            $wiz['generated'][$ext]=['mac'=>$res,'url'=>$PUBLIC_PROVISION_PATH.'/'.$res.'.xml','created'=>date('c')];
+            $count++;
+            if ($useSRAPS && $pushOnGen && !empty($wiz['sraps']['statusOK'])) {
+                try {
+                    sraps_assign_device($wiz['sraps'], $res, ($wiz['assign'][$ext]['model'] ?? ''), ($found['fullname'] ?? ''));
+                } catch (Throwable $se) {
+                    $errors[] = "SRAPS {$ext}: ".$se->getMessage();
+                }
+            }
+        } else $errors[]="Failed {$ext}: {$res}";
     }
     save_wiz_to_db($pdo,$sysId,$uid,$wiz);
     $msg = "Regenerated {$count} profiles."; if (!empty($errors)) $msg .= ' Errors: '.implode('; ',$errors);
@@ -745,7 +1037,7 @@ if (!empty($show_edit_ext)) {
     $ext = $show_edit_ext;
     if (!isset($wiz['settings'][$ext])) $wiz['settings'][$ext] = [];
     if (empty($wiz['settings'][$ext]['http_pass'])) {
-        $wiz['settings'][$ext]['http_pass'] = random_password_no_symbols(16);
+        $wiz['settings'][$ext]['http_pass'] = random_password(16);
     }
     if (empty($wiz['settings'][$ext]['user_http_pass'])) {
         $wiz['settings'][$ext]['user_http_pass'] = random_password(16);
@@ -762,14 +1054,16 @@ foreach ($exts as $row) {
 }
 $ext_to_fullname_json = json_encode($ext_to_fullname, JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_AMP|JSON_HEX_QUOT);
 
-/* Locale list (unique, order preserved) */
+/* Locale list (subset) */
 $localeCodes = array_unique([
-"om_ET","om_KE","aa_ET","af_ZA","af_NA","sq_AL","sq_MK","sq_XK","am_ET","ar_EG","ar_DZ","ar_BH","ar_TD","ar_KM","ar_DJ","ar_ER","ar_IQ","ar_IL","ar_JO","ar_KW","ar_LB","ar_LY","ar_MR","ar_MA","ar_OM","ar_PS","ar_QA","ar_SA","ar_SO","ar_SD","ar_SY","ar_TN","ar_AE","ar_EH","ar_YE","ar_SS","ar_001","hy_AM","as_IN","az_AZ","az_IR","ba_RU","eu_ES","bn_BD","bn_IN","dz_BT","br_FR","bg_BG","my_MM","be_BY","km_KH","ca_ES","ca_AD","ca_FR","ca_IT","zh_CN","zh_HK","zh_MO","zh_SG","zh_TW","co_FR","hr_HR","hr_BA","cs_CZ","da_DK","da_GL","nl_NL","nl_AW","nl_BE","nl_CW","nl_SR","nl_BQ","nl_SX","en_US","en_AS","en_AI","en_AG","en_AU","en_AT","en_BS","en_BB","en_BE","en_BZ","en_BM","en_BW","en_IO","en_BI","en_CM","en_CA","en_KY","en_CX","en_CC","en_CK","en_CY","en_DK","en_DM","en_ER","en_FK","en_FJ","en_FI","en_GG","en_GM","en_DE","en_GH","en_GI","en_GD","en_GU","en_GY","en_HK","en_IN","en_IE","en_IL","en_JM","en_KE","en_KI","en_LS","en_LR","en_MO","en_MG","en_MW","en_MY","en_MT","en_MH","en_MU","en_FM","en_MS","en_NA","en_NR","en_NL","en_NZ","en_NG","en_NU","en_NF","en_MP","en_PK","en_PW","en_PG","en_PH","en_PN","en_PR","en_RW","en_KN","en_LC","en_VC","en_WS","en_SC","en_SL","en_SG","en_SI","en_SB","en_ZA","en_SH","en_SD","en_SZ","en_SE","en_CH","en_TZ","en_TK","en_TO","en_TT","en_TC","en_TV","en_UG","en_AE","en_GB","en_UM","en_VU","en_VG","en_VI","en_ZM","en_ZW","en_DG","en_IM","en_JE","en_SS","en_SX","en_001","en_150","eo_001","et_EE","fo_FO","fo_DK","fi_FI","fr_FR","fr_DZ","fr_BE","fr_BJ","fr_BF","fr_BI","fr_CM","fr_CA","fr_CF","fr_TD","fr_KM","fr_CD","fr_CG","fr_CI","fr_DJ","fr_GQ","fr_GF","fr_PF","fr_GA","fr_GP","fr_GN","fr_HT","fr_LU","fr_MG","fr_ML","fr_MQ","fr_MR","fr_MU","fr_YT","fr_MC","fr_MA","fr_NC","fr_NE","fr_RE","fr_RW","fr_SN","fr_SC","fr_PM","fr_CH","fr_SY","fr_TG","fr_TN","fr_VU","fr_WF","fr_BL","fr_MF","fy_NL","gd_GB","gl_ES","ka_GE","de_DE","de_AT","de_BE","de_IT","de_LI","de_LU","de_CH","el_GR","el_CY","kl_GL","gn_PY","gu_IN","ha_NG","ha_GH","ha_NE","he_IL","hi_IN","hu_HU","is_IS","id_ID","ia_001","iu_CA","ga_IE","ga_GB","it_IT","it_SM","it_CH","it_VA","ja_JP","jv_ID","kn_IN","ks_IN","kk_KZ","rw_RW","ky_KG","ko_KR","ko_KP","ku_TR","rn_BI","lo_LA","la_VA","lv_LV","ln_CD","ln_AO","ln_CF","ln_CG","lt_LT","mk_MK","mg_MG","ms_MY","ms_BN","ms_ID","ms_SG","ml_IN","mt_MT","mi_NZ","mr_IN","mn_MN","mn_CN","ne_NP","ne_IN","nb_NO","nb_SJ","oc_FR","or_IN","ps_AF","ps_PK","fa_IR","fa_AF","pl_PL","pt_BR","pt_AO","pt_CV","pt_TL","pt_GQ","pt_GW","pt_LU","pt_MO","pt_MZ","pt_PT","pt_ST","pt_CH","pa_IN","pa_PK","qu_PE","qu_BO","qu_EC","rm_CH","ro_RO","ro_MD","ru_RU","ru_BY","ru_KZ","ru_KG","ru_MD","ru_UA","sg_CF","sa_IN","sr_RS","sr_BA","sr_ME","sr_XK","os_GE","os_RU","st_ZA","tn_ZA","sn_ZW","sd_PK","sd_IN","si_LK","ss_ZA","sk_SK","sl_SI","so_SO","so_DJ","so_ET","so_KE","es_ES","es_AR","es_BZ","es_BO","es_BR","es_CL","es_CO","es_CR","es_CU","es_DO","es_EC","es_SV","es_GQ","es_GT","es_HN","es_MX","es_NI","es_PA","es_PY","es_PE","es_PH","es_PR","es_US","es_UY","es_VE","es_IC","es_419","es_EA","su_ID","sw_TZ","sw_CD","sw_KE","sw_UG","sv_SE","sv_FI","sv_AX","sc_IT","tg_TJ","ta_IN","ta_MY","ta_SG","ta_LK","tt_RU","te_IN","th_TH","bo_CN","bo_IN","ti_ET","ti_ER","to_TO","ts_ZA","tr_TR","tr_CY","tk_TM","ug_CN","uk_UA","ur_PK","ur_IN","uz_UZ","uz_AF","vi_VN","vo_001","cy_GB","wo_SN","xh_ZA","yi_001","yo_NG","yo_BJ","zu_ZA","nn_NO","bs_BA","dv_MV","gv_IM","kw_GB","ak_GH","kok_IN","gaa_GH","ig_NG","kam_KE","syr_IQ","byn_ER","gez_ET","sid_ET","cch_NG","tig_ER","kaj_NG","fur_IT","ve_ZA","ee_GH","ee_TG","wal_ET","haw_US","kcg_NG","ny_MW","fil_PH","gsw_CH","gsw_FR","gsw_LI","ii_CN","kpe_LR","nds_DE","nds_NL","nr_ZA","nso_ZA","se_NO","se_FI","se_SE","trv_TW","guz_KE","dav_KE","ff_SN","ff_BF","ff_CM","ff_GM","ff_GH","ff_GN","ff_GW","ff_LR","ff_MR","ff_NE","ff_NG","ff_SL","ki_KE","saq_KE","seh_MZ","nd_ZW","rof_TZ","shi_MA","kab_DZ","nyn_UG","bez_TZ","vun_TZ","bm_ML","ebu_KE","chr_US","mfe_MU","kde_TZ","lag_TZ","lg_UG","bem_ZM","kea_CV","mer_KE","kln_KE","naq_NA","jmc_TZ","ksh_DE","mas_KE","mas_TZ","xog_UG","luy_KE","asa_TZ","teo_UG","teo_KE","ssy_ER","khq_ML","rwk_TZ","luo_KE","cgg_UG","tzm_MA","ses_ML","ksb_TZ","brx_IN","ce_RU","cu_RU","cv_RU","lu_CD","lb_LU","nv_US","wa_BE","agq_CM","bas_CM","dje_NE","dua_CM","dyo_SN","ewo_CM","ksf_CM","mgh_MZ","mua_CM","nmg_CM","nus_SS","sah_RU","sbp_TZ","twq_NE","vai_LR","wae_CH","yav_CM","ast_ES","jgo_CM","kkj_CM","mgo_CM","nnh_CM","an_ES","doi_IN","mni_IN","sat_IN","blt_VN","bss_CM","lkt_US","zgh_MA","arn_CL","ckb_IQ","ckb_IR","dsb_DE","hsb_DE","ken_CM","moh_CA","nqo_GN","prg_001","quc_GT","sma_SE","smj_SE","smn_FI","sms_FI","wbp_AU","mai_IN","mzn_IR","lrc_IR","lrc_IQ","yue_HK","yue_CN","osa_US","io_001","jbo_001","scn_IT","sdh_IR","bgn_PK","ceb_PH","myv_RU","cic_US","mus_US","szl_PL","pcm_NG"
+  "en_US","en_GB","en_CA","en_AU","fr_FR","fr_CA","es_ES","es_MX","de_DE","it_IT",
+  "pt_PT","pt_BR","nl_NL","sv_SE","no_NO","da_DK","fi_FI","pl_PL","cs_CZ","sk_SK",
+  "sl_SI","hu_HU","ro_RO","bg_BG","el_GR","tr_TR","ru_RU","uk_UA","ar_SA","he_IL",
+  "zh_CN","zh_TW","ja_JP","ko_KR"
 ]);
 
 /* Render */
 $title_safe = sanitize_for_ui((string)($sys['label'] ?? 'Provisioning'));
-$sraps_ok = isset($wiz['sraps']) && !empty($wiz['sraps']['statusOK']);
 ?>
 <!doctype html>
 <html lang="en">
@@ -821,21 +1115,16 @@ body{background:var(--bg);margin:18px;font-family:Inter,system-ui,-apple-system,
 .mac-combo-item{padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer;font-family:monospace}
 .mac-combo-item:hover,.mac-combo-item.active{background:#f1f7ff}
 .mac-combo-empty{padding:8px 10px;color:#64748b}
-
-/* Actions bar and search */
 .actions-bar{display:flex;align-items:center;gap:8px;flex-wrap:nowrap;white-space:nowrap;overflow-x:auto;padding-bottom:2px}
 .search-input{height:30px;padding:6px 8px;border:1px solid var(--border);border-radius:10px;font-size:12px;width:240px;min-width:180px}
 
-/* Toasts */
+/* quick toast */
 .center-toast-overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.05);z-index:99999}
 .center-toast{display:flex;align-items:center;gap:12px;background:#111827;color:#fff;border-radius:10px;padding:12px 14px;box-shadow:0 10px 30px rgba(0,0,0,.25);max-width:80vw}
 .center-toast.warn{background:#b45309}
 .close-btn{appearance:none;border:0;background:transparent;color:#fff;font-size:20px;cursor:pointer}
-
-/* SRAPS dot */
-.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;background:#dc2626}
-.dot.ok{background:#16a34a}
-.dot.bad{background:#dc2626}
+.hint{font-size:12px;color:#64748b}
+.sraps-grid{display:grid;grid-template-columns:180px 1fr;gap:8px 12px;align-items:center}
 </style>
 <?php
 $themeRel = 'assets/css/theme-snom.css';
@@ -862,10 +1151,7 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
     </div>
 
     <div class="header-actions">
-      <button id="open-sraps" class="btn inline" type="button" title="SRAPS">
-        <span id="sraps-dot" class="dot <?= $sraps_ok ? 'ok' : 'bad' ?>"></span>
-        SRAPS
-      </button>
+      <button id="open-sraps" class="btn inline" type="button" title="SRAPS">SRAPS</button>
       <button class="btn secondary inline" type="button" onclick="document.getElementById('switch-site-modal').style.display='flex'">Switch Site</button>
       <a href="logout.php" class="btn warn inline" style="text-decoration:none">Logout</a>
       <form method="post" style="margin:0"><input type="hidden" name="fetch_ucm" value="1"><button class="btn secondary inline" type="submit">Refresh Extensions</button></form>
@@ -889,8 +1175,6 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
       <button class="btn inline" type="button" onclick="location.href='dect.php?system_id=<?= (int)$sysId ?>'">DECT</button>
       <button class="btn inline" type="button" onclick="location.href='m500.php?system_id=<?= (int)$sysId ?>'">M500</button>
       <button class="btn inline" type="button" onclick="location.href='hotel.php?system_id=<?= (int)$sysId ?>'">Hotel Phones</button>
-
-      <!-- Inline dynamic search (no server calls) -->
       <input id="search-all" class="search-input" type="text" placeholder="Search name, ext, MAC, model" aria-label="Search">
       <button id="search-btn" class="btn inline" type="button">Search</button>
     </div>
@@ -977,11 +1261,12 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="global-modal-title" style="max-width:920px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
       <h3 id="global-modal-title" style="margin:0;font-size:16px">Global Settings</h3>
-      <div><a class="btn secondary inline" href="extensions.php?system_id=<?= (int)$sysId ?>" style="text-decoration:none">Close</a></div>
+      <div><a class="btn secondary inline" href="extensions.php?system_id=<?=
+        (int)$sysId ?>" style="text-decoration:none">Close</a></div>
     </div>
 
     <div class="tabs">
-      <div class="tab active" data-tab="tab-loc">Localization</div>
+      <div class="tab" data-tab="tab-loc">Localization</div>
       <div class="tab" data-tab="tab-contacts">Contact List</div>
       <div class="tab" data-tab="tab-maint">Maintenance</div>
       <div class="tab" data-tab="tab-net">Network</div>
@@ -989,99 +1274,41 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
       <div class="tab" data-tab="tab-prov">Provisioning</div>
       <div class="tab" data-tab="tab-call">Call Features</div>
       <div class="tab" data-tab="tab-custom">Custom XML</div>
-      <div class="tab" data-tab="tab-sraps">SRAPS</div>
+      <div class="tab active" data-tab="tab-sraps">SRAPS</div>
     </div>
 
     <form method="post" style="display:block">
       <!-- Localization -->
-      <div id="tab-loc" class="tabpanel active">
+      <div id="tab-loc" class="tabpanel">
         <div class="section-card">
           <div class="form-grid">
-            <div class="label">Web UI Language</div>
+            <div class="label">LCD language</div>
             <div class="value">
-              <select class="small-input" name="global[loc_web_language]">
-                <?php
-                $webLang = $wiz['global']['loc_web_language'] ?? 'English';
-                $webOpts = ["English","Dansk","Deutsch","Español","Français","Italiano","Polski","Svenska","Українська"];
-                foreach ($webOpts as $opt) { $sel = ($webLang === $opt) ? 'selected' : ''; echo '<option '.$sel.'>'.e($opt).'</option>'; }
-                ?>
+              <select name="global[loc_lcd_language]" class="small-input">
+                <option value="">System default</option>
+                <?php foreach ($localeCodes as $lc): $sel = (($wiz['global']['loc_lcd_language'] ?? '')===$lc)?'selected':''; ?>
+                  <option value="<?= e($lc) ?>" <?= $sel ?>><?= e($lc) ?></option>
+                <?php endforeach; ?>
               </select>
             </div>
-
-            <div class="label">Phone LCD Language</div>
-            <div class="value">
-              <select class="small-input" name="global[loc_lcd_language]">
-                <?php
-                $lcdLang = $wiz['global']['loc_lcd_language'] ?? ($wiz['global']['loc_language'] ?? 'English');
-                $lcdOpts = ["English","Dansk","Deutsch","Español","Français","Italiano","Magyar","Nederlands","Polski","Svenska","Tiếng Việt","Українська"];
-                foreach ($lcdOpts as $opt) { $sel = ($lcdLang === $opt) ? 'selected' : ''; echo '<option '.$sel.'>'.e($opt).'</option>'; }
-                ?>
-              </select>
-            </div>
-
-            <div class="label">Time Zone</div>
-            <div class="value">
-              <select class="small-input" name="global[loc_timezone]">
-                <?php
-                $tz = $wiz['global']['loc_timezone'] ?? '';
-                $tzOpts = [
-                  'USA-10','USA-9','CAN-8','MEX-8','USA-8','CAN-7','MEX-7','USA2-7','USA-7','CAM-6','CAN-6','CAN2-6','CHL-6','MEX-6','USA-6',
-                  'BHS-5','CAN-5','CUB-5','USA-5','VEN-4.5','CAN-4','CHL-4','PRY-4','BMU-4','FLK-4','TTB-4','CAN-3.5','GRL-3','ARG-3','BRA2-3','BRA1-3',
-                  'BRA-2','PRT-1','FRO-0','IRL-0','PRT-0','ESP-0','GBR-0','ALB+1','AUT+1','BEL+1','CAI+1','CHA+1','HRV+1','CZE+1','DNK+1','FRA+1','GER+1',
-                  'HUN+1','ITA+1','LUX+1','MAK+1','NLD+1','NAM+1','NOR+1','POL+1','SVK+1','ESP+1','SWE+1','CHE+1','GIB+1','YUG+1','WAT+1','BLR+2','BGR+2',
-                  'CYP+2','CAT+2','EGY+2','EST+2','FIN+2','GAZ+2','GRC+2','ISR+2','JOR+2','LVA+2','LBN+2','MDA+2','RUS+2','ROU+2','SYR+2','TUR+2','UKR+2',
-                  'EAT+3','IRQ+3','RUS+3','IRN+3.5','ARM+4','AZE+4','GEO+4','KAZ+4','RUS+4','KAZ+5','KGZ+5','PAK+5','RUS+5','IND+5.5','KAZ+6','RUS+6',
-                  'RUS+7','THA+7','CHN+7','SGP+8','KOR+8','AUS+8','JPN+9','AUS+9.5','AUS2+9.5','AUS+10','AUS2+10','AUS3+10','RUS+10','AUS+10.5',
-                  'NCL+11','NZL+12','RUS+12','NZL+12.75','TON+13'
-                ];
-                echo '<option value=""></option>';
-                foreach ($tzOpts as $opt) { $sel = ($tz === $opt) ? 'selected' : ''; echo '<option '.$sel.'>'.e($opt).'</option>'; }
-                ?>
-              </select>
-            </div>
-
-            <div class="label">Locale (date/time)</div>
-            <div class="value">
-              <select class="small-input" name="global[loc_locale]">
-                <?php
-                  $loc = $wiz['global']['loc_locale'] ?? 'en_US';
-                  foreach ($localeCodes as $code) {
-                      $sel = ($loc === $code) ? 'selected' : '';
-                      echo '<option value="'.e($code).'" '.$sel.'>'.e($code).'</option>';
-                  }
-                ?>
-              </select>
-            </div>
-
-            <div class="label">NTP Server</div>
-            <div class="value">
-              <input class="small-input" name="global[ntp_server]" value="<?= e($wiz['global']['ntp_server'] ?? 'pool.ntp.org') ?>" placeholder="pool.ntp.org">
-            </div>
-
-            <div class="label">NTP Update Interval (sec)</div>
-            <div class="value">
-              <input class="small-input" name="global[ntp_refresh_timer]" value="<?= e($wiz['global']['ntp_refresh_timer'] ?? '3600') ?>" placeholder="3600">
-            </div>
+            <div class="label">Web UI language</div>
+            <div class="value"><input class="small-input" name="global[loc_web_language]" value="<?= e($wiz['global']['loc_web_language'] ?? '') ?>" placeholder="en_US"></div>
+            <div class="label">Locale</div>
+            <div class="value"><input class="small-input" name="global[loc_locale]" value="<?= e($wiz['global']['loc_locale'] ?? '') ?>" placeholder="en_US"></div>
+            <div class="label">Timezone</div>
+            <div class="value"><input class="small-input" name="global[loc_timezone]" value="<?= e($wiz['global']['loc_timezone'] ?? '') ?>" placeholder="UTC"></div>
           </div>
         </div>
       </div>
 
-      <!-- Contact List -->
+      <!-- Contacts -->
       <div id="tab-contacts" class="tabpanel">
         <div class="section-card">
           <div class="form-grid">
-            <div class="label">Enable LDAP</div>
-            <div class="value">
-              <select class="small-input" name="global[contacts_ldap_enable]">
-                <?php $en = $wiz['global']['contacts_ldap_enable'] ?? 'off';
-                foreach (['on'=>'On','off'=>'Off'] as $k=>$v){ $sel=($en===$k)?'selected':''; echo "<option value=\"$k\" $sel>$v</option>"; } ?>
-              </select>
-            </div>
-
-            <div class="label">Tbook URL</div>
-            <div class="value">
-              <input class="small-input" name="global[contacts_tbook_url]" value="<?= e($wiz['global']['contacts_tbook_url'] ?? '') ?>" placeholder="http(s)://.../tbook.xml">
-            </div>
+            <div class="label">Directory URL</div>
+            <div class="value"><input class="small-input" name="global[contacts_tbook_url]" value="<?= e($wiz['global']['contacts_tbook_url'] ?? '') ?>" placeholder="http(s)://..."></div>
+            <div class="label">LDAP enabled</div>
+            <div class="value"><input type="checkbox" name="global[contacts_ldap_enable]" value="on" <?= (($wiz['global']['contacts_ldap_enable'] ?? 'off')==='on')?'checked':'' ?>></div>
           </div>
         </div>
       </div>
@@ -1090,16 +1317,12 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
       <div id="tab-maint" class="tabpanel">
         <div class="section-card">
           <div class="form-grid">
-            <?php
-              $models = ['D895','D892','D865','D862','D815','D812','D150','D140','D810WB'];
-              foreach ($models as $m) {
-                $key = 'maint_fw_'.strtoupper($m);
-                $val = $wiz['global'][$key] ?? '';
-                echo '<div class="label">Firmware URL - '.e($m).'</div><div class="value"><input class="small-input" name="global['.e($key).']" value="'.e($val).'" placeholder="http(s)://.../'.e($m).'/firmware.bin"></div>';
-              }
-            ?>
-            <div class="label">Syslog Server</div>
-            <div class="value"><input class="small-input" name="global[syslog_server]" value="<?= e($wiz['global']['syslog_server'] ?? '') ?>" placeholder="host or IP"></div>
+            <div class="label">Syslog server</div>
+            <div class="value"><input class="small-input" name="global[syslog_server]" value="<?= e($wiz['global']['syslog_server'] ?? '') ?>"></div>
+            <div class="label">Firmware URL (model-specific)</div>
+            <div class="value"><input class="small-input" name="global[maint_fw_D862]" value="<?= e($wiz['global']['maint_fw_D862'] ?? '') ?>" placeholder="D862 firmware URL"></div>
+            <div class="label"></div>
+            <div class="value"><input class="small-input" name="global[maint_fw_D865]" value="<?= e($wiz['global']['maint_fw_D865'] ?? '') ?>" placeholder="D865 firmware URL"></div>
           </div>
         </div>
       </div>
@@ -1108,36 +1331,22 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
       <div id="tab-net" class="tabpanel">
         <div class="section-card">
           <div class="form-grid">
-            <div class="label">VLAN (LAN)</div>
-            <div class="value"><input class="small-input" name="global[net_vlan_lan]" value="<?= e($wiz['global']['net_vlan_lan'] ?? ($wiz['global']['net_vlan_voice'] ?? '')) ?>" placeholder="e.g. 20"></div>
-
-            <div class="label">VLAN (PC)</div>
+            <div class="label">SIP transport</div>
+            <div class="value">
+              <select name="global[sec_sip_transport]" class="small-input">
+                <?php foreach (['udp','tcp','tls'] as $t): $sel=(($wiz['global']['sec_sip_transport'] ?? 'udp')===$t)?'selected':''; ?>
+                  <option value="<?= e($t) ?>" <?= $sel ?>><?= strtoupper(e($t)) ?></option>
+                <?php endforeach; ?>
+              </select>
+            </div>
+            <div class="label">LAN VLAN</div>
+            <div class="value"><input class="small-input" name="global[net_vlan_lan]" value="<?= e($wiz['global']['net_vlan_lan'] ?? '') ?>" placeholder="e.g. 20"></div>
+            <div class="label">PC VLAN</div>
             <div class="value"><input class="small-input" name="global[net_vlan_pc]" value="<?= e($wiz['global']['net_vlan_pc'] ?? '') ?>" placeholder="e.g. 10"></div>
-
-            <div class="label">VLAN Priority (0-7) PC</div>
-            <div class="value">
-              <input class="small-input" name="global[vlan_pc_priority]" value="<?= e($wiz['global']['vlan_pc_priority'] ?? '') ?>" placeholder="0-7">
-            </div>
-
-            <div class="label">VLAN Priority (0-7)</div>
-            <div class="value">
-              <input class="small-input" name="global[vlan_qos]" value="<?= e($wiz['global']['vlan_qos'] ?? '') ?>" placeholder="0-7">
-            </div>
-
-            <div class="label">DSCP (SIP)</div>
-            <div class="value"><input class="small-input" name="global[net_dscp_sip]" value="<?= e($wiz['global']['net_dscp_sip'] ?? '46') ?>" placeholder="0-63"></div>
-
-            <div class="label">DSCP (RTP)</div>
-            <div class="value"><input class="small-input" name="global[net_dscp_rtp]" value="<?= e($wiz['global']['net_dscp_rtp'] ?? '46') ?>" placeholder="0-63"></div>
-
-            <div class="label">Codecs</div>
-            <div class="value"><input class="small-input" name="global[codec_priority_list]" value="<?= e($wiz['global']['codec_priority_list'] ?? 'g722,pcmu,pcma,g729,telephone-event') ?>"></div>
-
-            <div class="label">RTP Start</div>
-            <div class="value"><input class="small-input" name="global[rtp_port_start]" value="<?= e($wiz['global']['rtp_port_start'] ?? '49152') ?>" placeholder="49152"></div>
-
-            <div class="label">RTP End</div>
-            <div class="value"><input class="small-input" name="global[rtp_port_end]" value="<?= e($wiz['global']['rtp_port_end'] ?? '65534') ?>" placeholder="65534"></div>
+            <div class="label">DSCP SIP</div>
+            <div class="value"><input class="small-input" name="global[net_dscp_sip]" value="<?= e($wiz['global']['net_dscp_sip'] ?? '') ?>" placeholder="46"></div>
+            <div class="label">DSCP RTP</div>
+            <div class="value"><input class="small-input" name="global[net_dscp_rtp]" value="<?= e($wiz['global']['net_dscp_rtp'] ?? '') ?>" placeholder="46"></div>
           </div>
         </div>
       </div>
@@ -1146,30 +1355,13 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
       <div id="tab-sec" class="tabpanel">
         <div class="section-card">
           <div class="form-grid">
-            <div class="label">TLS min</div>
-            <div class="value">
-              <select class="small-input" name="global[sec_tls_min]">
-                <?php $tls = $wiz['global']['sec_tls_min'] ?? '1.2';
-                  foreach (['1.0','1.1','1.2','1.3'] as $ver){ $sel=($tls===$ver)?'selected':''; echo "<option $sel>".e($ver)."</option>"; } ?>
-              </select>
-            </div>
-
-            <div class="label">Lock LCD</div>
-            <div class="value">
-              <select class="small-input" name="global[sec_lock_lcd]">
-                <?php $lk = $wiz['global']['sec_lock_lcd'] ?? 'off';
-                  foreach (['off'=>'Off','on'=>'On'] as $k=>$v){ $sel=($lk===$k)?'selected':''; echo "<option value=\"$k\" $sel>$v</option>"; } ?>
-              </select>
-            </div>
-
             <div class="label">Force admin password</div>
             <div class="value">
-              <input type="checkbox" id="force_admin_password" name="global[force_admin_password]" value="on" <?= (($wiz['global']['force_admin_password'] ?? 'off') === 'on') ? 'checked' : '' ?>>
+              <input type="checkbox" id="force_admin_password" name="global[force_admin_password]" value="on" <?= (($wiz['global']['force_admin_password'] ?? 'off')==='on')?'checked':'' ?>>
             </div>
-
-            <div class="label">Admin password (HTTP)</div>
+            <div class="label">Forced admin password</div>
             <div class="value">
-              <input class="small-input" type="password" id="forced_admin_password" name="global[forced_admin_password]" value="<?= e($wiz['global']['forced_admin_password'] ?? '') ?>" placeholder="Enter admin password" <?= (($wiz['global']['force_admin_password'] ?? 'off') === 'on') ? '' : 'disabled' ?>>
+              <input class="small-input" id="forced_admin_password" name="global[forced_admin_password]" value="<?= e($wiz['global']['forced_admin_password'] ?? '') ?>" <?= (($wiz['global']['force_admin_password'] ?? 'off')==='on')?'':'disabled' ?>>
             </div>
           </div>
         </div>
@@ -1179,11 +1371,10 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
       <div id="tab-prov" class="tabpanel">
         <div class="section-card">
           <div class="form-grid">
-            <div class="label">setting_server</div>
-            <div class="value"><input class="small-input" name="global[setting_server]" value="<?= e($wiz['global']['setting_server'] ?? 'v2.6.1c/provisioning_files') ?>" placeholder="http(s)://host/path OR relative path"></div>
-
-            <div class="label">Polling (sec)</div>
-            <div class="value"><input class="small-input" name="global[prov_polling_period]" value="<?= e($wiz['global']['prov_polling_period'] ?? '3600') ?>" placeholder="0..3600"></div>
+            <div class="label">Setting server URL</div>
+            <div class="value"><input class="small-input" name="global[setting_server]" value="<?= e($wiz['global']['setting_server'] ?? 'v2.6.1c/provisioning_files') ?>" placeholder="v2.6.1c/provisioning_files"></div>
+            <div class="label">Polling period (sec)</div>
+            <div class="value"><input class="small-input" type="number" min="0" max="3600" name="global[prov_polling_period]" value="<?= e($wiz['global']['prov_polling_period'] ?? '0') ?>"></div>
           </div>
         </div>
       </div>
@@ -1192,80 +1383,31 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
       <div id="tab-call" class="tabpanel">
         <div class="section-card">
           <div class="form-grid">
-            <div class="label">Voicemail Number</div>
-            <div class="value">
-              <input class="small-input" name="global[vm_key]" value="<?= e($wiz['global']['vm_key'] ?? '') ?>" placeholder="e.g. *97 or 5000">
-            </div>
-
-            <div class="label">Call Waiting</div>
-            <div class="value">
-              <?php $cw = $wiz['global']['call_waiting'] ?? 'on'; ?>
-              <select class="small-input" name="global[call_waiting]">
-                <option value="on" <?= $cw==='on'?'selected':''; ?>>On</option>
-                <option value="off" <?= $cw==='off'?'selected':''; ?>>Off</option>
-              </select>
-            </div>
-
-            <div class="label">Transfer on Hangup</div>
-            <div class="value">
-              <?php $toh = $wiz['global']['transfer_on_hangup'] ?? 'off'; ?>
-              <select class="small-input" name="global[transfer_on_hangup]">
-                <option value="on" <?= $toh==='on'?'selected':''; ?>>On</option>
-                <option value="off" <?= $toh==='off'?'selected':''; ?>>Off</option>
-              </select>
-            </div>
-
-            <div class="label">Transfer on Hangup (Non-POTS)</div>
-            <div class="value">
-              <?php $tohnp = $wiz['global']['transfer_on_hangup_non_pots'] ?? 'off'; ?>
-              <select class="small-input" name="global[transfer_on_hangup_non_pots]">
-                <option value="on" <?= $tohnp==='on'?'selected':''; ?>>On</option>
-                <option value="off" <?= $tohnp==='off'?'selected':''; ?>>Off</option>
-              </select>
-            </div>
-
-            <div class="label">Default Transfer Type</div>
-            <div class="value">
-              <?php $qt = $wiz['global']['quick_transfer'] ?? 'attended'; ?>
-              <select class="small-input" name="global[quick_transfer]">
-                <option value="attended" <?= $qt==='attended'?'selected':''; ?>>Attended</option>
-                <option value="blind" <?= $qt==='blind'?'selected':''; ?>>Blind</option>
-              </select>
-            </div>
-
-            <div class="label">Transfer While Dialing</div>
-            <div class="value">
-              <?php $td = $wiz['global']['transfer_dialing_on'] ?? 'attended'; ?>
-              <select class="small-input" name="global[transfer_dialing_on]">
-                <option value="attended" <?= $td==='attended'?'selected':''; ?>>Attended</option>
-                <option value="blind" <?= $td==='blind'?'selected':''; ?>>Blind</option>
-              </select>
-            </div>
-
-            <div class="label">Mute Button is DND in Idle</div>
-            <div class="value">
-              <?php $md = $wiz['global']['mute_is_dnd_in_idle'] ?? 'on'; ?>
-              <select class="small-input" name="global[mute_is_dnd_in_idle]">
-                <option value="on" <?= $md==='on'?'selected':''; ?>>On</option>
-                <option value="off" <?= $md==='off'?'selected':''; ?>>Off</option>
-              </select>
-            </div>
+            <div class="label">Codec priority list</div>
+            <div class="value"><input class="small-input" name="global[codec_priority_list]" value="<?= e($wiz['global']['codec_priority_list'] ?? 'g722,pcmu,pcma,g729,telephone-event') ?>"></div>
+            <div class="label">RTP port start</div>
+            <div class="value"><input class="small-input" type="number" name="global[rtp_port_start]" value="<?= e($wiz['global']['rtp_port_start'] ?? '49152') ?>"></div>
+            <div class="label">RTP port end</div>
+            <div class="value"><input class="small-input" type="number" name="global[rtp_port_end]" value="<?= e($wiz['global']['rtp_port_end'] ?? '65534') ?>"></div>
+            <div class="label">Voicemail key</div>
+            <div class="value"><input class="small-input" name="global[vm_key]" value="<?= e($wiz['global']['vm_key'] ?? '') ?>" placeholder="Ext for voicemail"></div>
+            <div class="label">Call waiting</div>
+            <div class="value"><input type="checkbox" name="global[call_waiting]" value="on" <?= (($wiz['global']['call_waiting'] ?? 'on')==='on')?'checked':'' ?>></div>
           </div>
         </div>
       </div>
 
-      <!-- Global Custom XML -->
+      <!-- Custom XML (global) -->
       <div id="tab-custom" class="tabpanel">
         <div class="section-card">
-          <textarea class="area" name="global[custom_xml_global]" placeholder="Custom XML under <phone-settings> (global)"><?php
-            $cxg = (string)($wiz['global']['custom_xml_global'] ?? '');
-            echo htmlspecialchars(sanitize_for_ui($cxg), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+          <textarea class="area" name="global[custom_xml_global]" placeholder="Custom XML under <phone-settings> (global)"><?=
+            htmlspecialchars((string)($wiz['global']['custom_xml_global'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')
           ?></textarea>
         </div>
       </div>
 
-      <!-- SRAPS (only two options requested) -->
-      <div id="tab-sraps" class="tabpanel">
+      <!-- SRAPS panel (active by default so details show) -->
+      <div id="tab-sraps" class="tabpanel active">
         <div class="section-card">
           <div class="form-grid">
             <div class="label">Use SRAPS</div>
@@ -1276,6 +1418,21 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
             <div class="label">Push to SRAPS on Generate</div>
             <div class="value">
               <input type="checkbox" name="global[sraps_push_on_generate]" value="on" <?= (($wiz['global']['sraps_push_on_generate'] ?? 'on') === 'on') ? 'checked' : '' ?>>
+            </div>
+
+            <div class="label">Organization ID</div>
+            <div class="value">
+              <input class="small-input" name="global[sraps_org]" value="<?= e($wiz['sraps']['orgId'] ?? '') ?>" placeholder="Company UUID">
+            </div>
+
+            <div class="label">Access Key ID</div>
+            <div class="value">
+              <input class="small-input" name="global[sraps_keyid]" value="<?= e($wiz['sraps']['accessKey'] ?? '') ?>" placeholder="Access Key ID">
+            </div>
+
+            <div class="label">Access Key Secret</div>
+            <div class="value">
+              <input class="small-input" name="global[sraps_secret]" type="password" value="<?= !empty($wiz['sraps']['secretKey']) ? '********' : '' ?>" placeholder="Secret (preserved if left ********)">
             </div>
           </div>
         </div>
@@ -1384,6 +1541,68 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
 </div>
 <?php endif; ?>
 
+<!-- SRAPS Quick Panel Modal -->
+<div id="sraps-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);align-items:center;justify-content:center;z-index:9999">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="sraps-title">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div class="small" id="sraps-status-line">
+        <span id="sraps-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:<?= !empty($wiz['sraps']['statusOK']) ? '#16a34a' : '#dc2626' ?>;margin-right:6px;"></span>
+        <strong><?= !empty($wiz['sraps']['statusOK']) ? 'Connected' : 'Disconnected' ?></strong>
+        <?php if (!empty($wiz['sraps']['statusAt'])): ?>
+          <span class="small" style="color:#64748b">Last: <?= e($wiz['sraps']['statusAt']) ?></span>
+        <?php endif; ?>
+      </div>
+      <div><button type="button" class="btn secondary inline" onclick="closeSraps()">Close</button></div>
+    </div>
+
+    <div class="tabs">
+      <div class="tab active" data-tab="s-cred">Credentials</div>
+      <div class="tab" data-tab="s-prof">Profiles</div>
+    </div>
+
+    <div id="s-cred" class="tabpanel active">
+      <div class="section-card">
+        <div class="sraps-grid">
+          <div>Base URL</div>
+          <div><input id="s-base" class="small-input" placeholder="https://api.sraps.snom.com/api/v1/" value="<?= e($wiz['sraps']['baseUrl'] ?? 'https://api.sraps.snom.com/api/v1/') ?>"></div>
+
+          <div>Organization ID</div>
+          <div><input id="s-org" class="small-input" placeholder="Company UUID" value="<?= e($wiz['sraps']['orgId'] ?? '') ?>"></div>
+
+          <div>Access Key ID</div>
+          <div><input id="s-id" class="small-input" placeholder="API Key ID" value="<?= e($wiz['sraps']['accessKey'] ?? '') ?>"></div>
+
+          <div>Access Key Secret</div>
+          <div><input id="s-key" class="small-input" type="password" placeholder="API Key Secret" value="<?= !empty($wiz['sraps']['secretKey']) ? '********' : '' ?>"></div>
+        </div>
+        <div class="group-actions" style="justify-content:flex-start">
+          <button id="s-save" type="button" class="btn inline">Save</button>
+          <button id="s-test" type="button" class="btn secondary inline">Test Connection</button>
+          <span class="hint">Save stores keys in session and DB (secret hidden). Click Test to validate.</span>
+        </div>
+      </div>
+    </div>
+
+    <div id="s-prof" class="tabpanel">
+      <div class="section-card">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+          <button id="s-load-prof" type="button" class="btn secondary inline">Load Profiles</button>
+          <span id="s-prof-count" class="hint"></span>
+        </div>
+        <div class="sraps-grid">
+          <div>D Series</div><div><select id="s-prof-D" class="small-input"><option value="">-- select --</option></select></div>
+          <div>M Series</div><div><select id="s-prof-M" class="small-input"><option value="">-- select --</option></select></div>
+          <div>M500</div><div><select id="s-prof-M500" class="small-input"><option value="">-- select --</option></select></div>
+          <div>Hotel Phones</div><div><select id="s-prof-HOTEL" class="small-input"><option value="">-- select --</option></select></div>
+        </div>
+        <div class="group-actions" style="justify-content:flex-start">
+          <button id="s-save-prof" type="button" class="btn inline">Save Profiles</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 const MAC_LIST = <?= $mac_list_json ?: '[]' ?>;
 const ASSIGNED_MACS = <?= $assigned_macs_json ?: '{}' ?>;
@@ -1392,9 +1611,8 @@ const FLASH_TYPE = <?= json_encode($toast_type) ?: '"success"' ?>;
 const SYSTEM_ID = <?= json_encode($sysId) ?>;
 const EXT_TO_NAME = <?= $ext_to_fullname_json ?: '{}' ?>;
 <?php if (!empty($show_edit_ext)): ?>const BLF_CAP = <?= (int)$edit_cap ?>;<?php else: ?>const BLF_CAP = null;<?php endif; ?>
-const SRAPS_STATUS_OK = <?= $sraps_ok ? 'true' : 'false' ?>;
 
-function showToast(message, type='success', duration=4000) {
+function showToast(message, type='success', duration=5000) {
   message = String(message || '').replace(/\s+/g,' ').replace(/\?+\s*$/,'').trim();
   if (!message) return;
   document.querySelectorAll('.center-toast-overlay').forEach(el => el.remove());
@@ -1404,29 +1622,11 @@ function showToast(message, type='success', duration=4000) {
   const close = document.createElement('button'); close.className = 'close-btn'; close.innerHTML = '&times;'; close.title='Close';
   close.addEventListener('click', () => overlay.remove());
   box.appendChild(txt); box.appendChild(close); overlay.appendChild(box); document.body.appendChild(overlay);
-  setTimeout(()=>{ overlay.remove(); }, Math.min(4000, Math.max(500, duration || 4000)));
-}
-
-function setSrapsConnected(ok){
-  const dot = document.getElementById('sraps-dot');
-  if (!dot) return;
-  dot.classList.toggle('ok', !!ok);
-  dot.classList.toggle('bad', !ok);
+  setTimeout(()=>{ overlay.remove(); }, duration);
 }
 
 document.addEventListener('DOMContentLoaded', function(){
-  try { if (FLASH_MSG) showToast(FLASH_MSG, FLASH_TYPE, 4000); } catch(e){}
-
-  // Initial SRAPS dot
-  try { setSrapsConnected(SRAPS_STATUS_OK); } catch(e){}
-
-  // SRAPS button: open Global Settings with SRAPS tab selected
-  const srapsBtn = document.getElementById('open-sraps');
-  if (srapsBtn) {
-    srapsBtn.addEventListener('click', () => {
-      window.location.href = 'extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID) + '&global=1&tab=tab-sraps';
-    });
-  }
+  try { if (FLASH_MSG) showToast(FLASH_MSG, FLASH_TYPE, 5000); } catch(e){}
 
   document.querySelectorAll('.tabpanel').forEach(p=>{
     p.style.display = p.classList.contains('active') ? 'block' : 'none';
@@ -1458,25 +1658,6 @@ document.addEventListener('DOMContentLoaded', function(){
       });
     });
   });
-
-  // If Global modal is open, auto-select tab from URL (?tab=tab-sraps or #tab-sraps)
-  const globalModal = document.getElementById('global-modal');
-  if (globalModal) {
-    const params = new URLSearchParams(location.search);
-    const targetTabId = params.get('tab') || (location.hash ? location.hash.replace('#','') : '');
-    if (targetTabId) {
-      const tabBtn = globalModal.querySelector('.tabs .tab[data-tab="'+targetTabId+'"]');
-      const panel = document.getElementById(targetTabId);
-      if (tabBtn && panel) {
-        const tabsEl = tabBtn.parentElement;
-        tabsEl.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-        tabBtn.classList.add('active');
-        const panels = Array.from(panel.parentElement.querySelectorAll('.tabpanel'));
-        panels.forEach(p => { p.classList.remove('active'); p.style.display = 'none'; });
-        panel.classList.add('active'); panel.style.display = 'block';
-      }
-    }
-  }
 
   // Toggle force admin password field
   const chk = document.getElementById('force_admin_password');
@@ -1512,8 +1693,109 @@ document.addEventListener('DOMContentLoaded', function(){
   if (searchBtn) searchBtn.addEventListener('click', applySearchFilter);
 
   attachMacCombos();
+
+  // wire SRAPS modal button
+  const openSrapsBtn = document.getElementById('open-sraps');
+  if (openSrapsBtn) openSrapsBtn.addEventListener('click', openSraps);
+
+  // Prefill SRAPS modal fields from server-side saved values
+  try {
+    document.getElementById('s-base').value = "<?= e($wiz['sraps']['baseUrl'] ?? 'https://api.sraps.snom.com/api/v1/') ?>";
+    document.getElementById('s-org').value = "<?= e($wiz['sraps']['orgId'] ?? '') ?>";
+    document.getElementById('s-id').value  = "<?= e($wiz['sraps']['accessKey'] ?? '') ?>";
+    document.getElementById('s-key').value = <?= !empty($wiz['sraps']['secretKey']) ? json_encode('********') : json_encode('') ?>;
+  } catch (e) {}
+
+  // SRAPS Save/Test handlers
+  const sSave = document.getElementById('s-save');
+  if (sSave) sSave.addEventListener('click', async ()=>{
+    const base = document.getElementById('s-base').value.trim();
+    const org = document.getElementById('s-org').value.trim();
+    const id  = document.getElementById('s-id').value.trim();
+    const secret = document.getElementById('s-key').value;
+    try {
+      await srapsApi('save_creds','POST',{ baseUrl: base, orgId: org, accessKey: id, secretKey: secret || null });
+      try {
+        await srapsApi('test','GET');
+        setSrapsConnected(true, new Date().toISOString());
+        showToast('Connection to SRAPS Established','success');
+      } catch (err) {
+        setSrapsConnected(false, new Date().toISOString());
+        showToast(err.message || 'Connection failed','warn');
+      }
+    } catch (e) { showToast(e.message || 'Save failed','warn'); }
+  });
+
+  const sTest = document.getElementById('s-test');
+  if (sTest) sTest.addEventListener('click', async ()=>{
+    try { await srapsApi('test','GET'); setSrapsConnected(true, new Date().toISOString()); showToast('Connection to SRAPS Established','success'); }
+    catch (e) { setSrapsConnected(false, new Date().toISOString()); showToast(e.message || 'Connection failed','warn'); }
+  });
+
+  // load profiles
+  const sLoad = document.getElementById('s-load-prof');
+  if (sLoad) sLoad.addEventListener('click', async ()=>{
+    try {
+      const r = await srapsApi('get_profiles','GET');
+      const profiles = Array.isArray(r.profiles) ? r.profiles : [];
+      document.getElementById('s-prof-count').textContent = String(profiles.length) + ' profiles';
+      fillProfilesSelect(document.getElementById('s-prof-D'), profiles, "<?= e($wiz['sraps']['profilesCat']['D'] ?? '') ?>");
+      fillProfilesSelect(document.getElementById('s-prof-M'), profiles, "<?= e($wiz['sraps']['profilesCat']['M'] ?? '') ?>");
+      fillProfilesSelect(document.getElementById('s-prof-M500'), profiles, "<?= e($wiz['sraps']['profilesCat']['M500'] ?? '') ?>");
+      fillProfilesSelect(document.getElementById('s-prof-HOTEL'), profiles, "<?= e($wiz['sraps']['profilesCat']['HOTEL'] ?? '') ?>");
+      showToast('Profiles loaded','success');
+    } catch (e) { showToast(e.message || 'Failed to load profiles','warn'); }
+  });
+
+  const sSaveProf = document.getElementById('s-save-prof');
+  if (sSaveProf) sSaveProf.addEventListener('click', async ()=>{
+    try {
+      await srapsApi('save_category_profiles','POST',{
+        profile_D: document.getElementById('s-prof-D').value || '',
+        profile_M: document.getElementById('s-prof-M').value || '',
+        profile_M500: document.getElementById('s-prof-M500').value || '',
+        profile_HOTEL: document.getElementById('s-prof-HOTEL').value || ''
+      });
+      showToast('Profiles saved','success');
+    } catch (e) { showToast(e.message || 'Save failed','warn'); }
+  });
 });
 
+function openSraps(){ document.getElementById('sraps-modal').style.display='flex'; }
+function closeSraps(){ document.getElementById('sraps-modal').style.display='none'; }
+function setSrapsConnected(ok, when){
+  const dot = document.getElementById('sraps-dot');
+  if (dot) dot.style.background = ok ? '#16a34a' : '#dc2626';
+  const line = document.getElementById('sraps-status-line');
+  if (line) line.querySelector('strong').textContent = ok ? 'Connected' : 'Disconnected';
+  if (line) {
+    let ts = line.querySelector('.small');
+    if (!ts){ ts = document.createElement('span'); ts.className='small'; ts.style.color='#64748b'; line.appendChild(ts); }
+    ts.textContent = when ? (' Last: ' + when) : '';
+  }
+}
+async function srapsApi(action, method='GET', body=null){
+  const url = 'extensions.php?system_id='+encodeURIComponent(<?= json_encode((int)$sysId) ?>)+'&sraps_action='+encodeURIComponent(action);
+  const opts = { method, headers:{} };
+  if (body!==null){ opts.headers['Content-Type']='application/json'; opts.body = JSON.stringify(body); }
+  const res = await fetch(url, opts);
+  const data = await res.json().catch(()=>null);
+  if (!res.ok) throw new Error((data && data.error) ? data.error : ('HTTP '+res.status));
+  return data;
+}
+function fillProfilesSelect(sel, items, saved){
+  sel.innerHTML = '<option value="">-- select --</option>' + items.map(p=>{
+    const id = (p.uuid || p.uuid_v4 || p.id || '').toString();
+    const name = (p.name || p.display_name || id || '').toString().replace(/</g,'&lt;');
+    return `<option value="${id}">${name}</option>`;
+  }).join('');
+  if (saved) {
+    const opt = Array.from(sel.options).find(o=>o.value===saved);
+    if (opt) sel.value = saved;
+  }
+}
+
+/* Generic helpers */
 function switchSiteGo(){
   const sel = document.getElementById('switch-site-select');
   const modal = document.getElementById('switch-site-modal');
@@ -1571,41 +1853,21 @@ function addBLF(){
   let extHtml = document.querySelector('#blf-list select[name^="cfg_blf_ext"]')?.innerHTML || '<option value="">-- Select Extension --</option>';
   const div=document.createElement('div'); div.style.display='flex'; div.style.gap='8px'; div.style.alignItems='center';
   div.innerHTML = `<strong style="width:28px">#${nextIdx}</strong>
-    <select name="cfg_blf_type[${nextIdx}]" class="small-input" style="width:120px">
-      <option value="blf" selected>BLF</option><option value="none">None</option>
-    </select>
-    <select name="cfg_blf_ext[${nextIdx}]" class="small-input blf-ext" style="width:220px">${extHtml}</select>
-    <input class="small-input" name="cfg_blf_value[${nextIdx}]" placeholder="Manual value (e.g. 1001)" style="flex:1">
-    <input class="small-input blf-label" name="cfg_blf_label[${nextIdx}]" placeholder="Label" style="width:200px">
-    <button type="button" class="btn ghost inline" onclick="this.closest('div').remove()">Remove</button>`;
+  <select name="cfg_blf_type[${nextIdx}]" class="small-input" style="width:120px"><option value="blf" selected>BLF</option><option value="none">None</option>;
+</option></select>
+  <select name="cfg_blf_ext[${nextIdx}]" class="small-input blf-ext" style="width:220px">${extHtml}</select>
+  <input class="small-input" name="cfg_blf_value[${nextIdx}]" placeholder="Manual value (e.g. 1001)" style="flex:1">
+  <input class="small-input blf-label" name="cfg_blf_label[${nextIdx}]" placeholder="Label" style="width:200px">
+  <button type="button" class="btn ghost inline" onclick="this.closest('div').remove()">Remove</button>`;
   list.appendChild(div);
 }
 
-function postEdit(ext){
-  if(!ext) return;
-  const f=document.createElement('form'); f.method='post'; f.style.display='none'; f.action='extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID);
-  const i=document.createElement('input'); i.type='hidden'; i.name='edit'; i.value=ext; f.appendChild(i);
-  document.body.appendChild(f); f.submit();
-}
-function postGenerate(ext){
-  if(!ext) return;
-  const f=document.createElement('form'); f.method='post'; f.style.display='none'; f.action='extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID);
-  const macInput = document.querySelector('input[name="assign['+ext+'][mac]"]');
-  if (macInput) { const h=document.createElement('input'); h.type='hidden'; h.name='assign['+ext+'][mac]'; h.value=(macInput.value||''); f.appendChild(h); }
-  const modelSel = document.querySelector('select[name="assign['+ext+'][model]"]');
-  if (modelSel) { const h=document.createElement('input'); h.type='hidden'; h.name='assign['+ext+'][model]'; h.value=(modelSel.value||''); f.appendChild(h); }
-  const i=document.createElement('input'); i.type='hidden'; i.name='generate_one'; i.value=ext; f.appendChild(i);
-  document.body.appendChild(f); f.submit();
-}
-function confirmDelete(ext){
-  if (!ext) return;
-  if (!confirm('Delete generated provisioning file for extension ' + ext + ' ?')) return;
-  const f=document.createElement('form'); f.method='post'; f.style.display='none'; f.action='extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID);
-  const i=document.createElement('input'); i.type='hidden'; i.name='delete_generated'; i.value = ext; f.appendChild(i);
-  document.body.appendChild(f); f.submit();
-}
+/* Post helpers */
+function postEdit(ext){ if(!ext) return; const f=document.createElement('form'); f.method='post'; f.style.display='none'; f.action='extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID); const i=document.createElement('input'); i.type='hidden'; i.name='edit'; i.value=ext; f.appendChild(i); document.body.appendChild(f); f.submit(); }
+function postGenerate(ext){ if(!ext) return; const f=document.createElement('form'); f.method='post'; f.style.display='none'; f.action='extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID); const macInput = document.querySelector('input[name="assign['+ext+'][mac]"]'); if (macInput) { const h=document.createElement('input'); h.type='hidden'; h.name='assign['+ext+'][mac]'; h.value=(macInput.value||''); f.appendChild(h); } const modelSel = document.querySelector('select[name="assign['+ext+'][model]"]'); if (modelSel) { const h=document.createElement('input'); h.type='hidden'; h.name='assign['+ext+'][model]'; h.value=(modelSel.value||''); f.appendChild(h); } const i=document.createElement('input'); i.type='hidden'; i.name='generate_one'; i.value=ext; f.appendChild(i); document.body.appendChild(f); f.submit(); }
+function confirmDelete(ext){ if (!ext) return; if (!confirm('Delete generated provisioning file for extension ' + ext + ' ?')) return; const f=document.createElement('form'); f.method='post'; f.style.display='none'; f.action='extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID); const i=document.createElement('input'); i.type='hidden'; i.name='delete_generated'; i.value = ext; f.appendChild(i); document.body.appendChild(f); f.submit(); }
 
-/* MAC combo with model autofill + suggestions */
+/* MAC combo with suggestions - ensure list shows after CSV upload */
 function attachMacCombos() {
   const macList = Array.isArray(MAC_LIST) ? MAC_LIST : [];
   document.querySelectorAll('.mac-combo').forEach(combo => {
@@ -1617,7 +1879,7 @@ function attachMacCombos() {
     function findModelForMac(mac) {
       if (!mac) return '';
       for (let i=0;i<macList.length;i++){
-        const m = (macList[i].mac || it.MAC || '').toString().replace(/[^A-Fa-f0-9]/g,'').toUpperCase();
+        const m = (macList[i].mac || macList[i].MAC || '').toString().replace(/[^A-Fa-f0-9]/g,'').toUpperCase();
         if (m === mac) return (macList[i].model || '').toString();
       }
       return '';
@@ -1653,7 +1915,7 @@ function attachMacCombos() {
       const first = listEl.querySelector('.mac-combo-item'); if (first) first.classList.add('active');
       listEl.style.display = 'block';
     }
-    function showList() { buildList(input.value || ''); }
+    function showList() { buildList(input.value || ''); listEl.style.display = 'block'; }
     function hideListSoon() { setTimeout(()=>listEl.style.display='none', 150); }
     function hideList() { listEl.style.display = 'none'; }
 

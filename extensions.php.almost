@@ -417,7 +417,7 @@ function write_profile($dir, $ucm_host, $extInfo, $mac, $overrides = [], $all_ex
     if (isset($overrides['prov_polling_period'])) {
         $period = (int)$overrides['prov_polling_period'];
         if ($period < 0) $period = 0;
-               if ($period > 3600) $period = 3600;
+        if ($period > 3600) $period = 3600;
         if ($period > 0) {
             $xml .= "    <prov_polling_enabled perm=\"RW\">on</prov_polling_enabled>\n";
             $xml .= "    <prov_polling_mode perm=\"RW\">rel</prov_polling_mode>\n";
@@ -1420,14 +1420,6 @@ document.addEventListener('DOMContentLoaded', function(){
   // Initial SRAPS dot
   try { setSrapsConnected(SRAPS_STATUS_OK); } catch(e){}
 
-  // SRAPS button: open Global Settings with SRAPS tab selected
-  const srapsBtn = document.getElementById('open-sraps');
-  if (srapsBtn) {
-    srapsBtn.addEventListener('click', () => {
-      window.location.href = 'extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID) + '&global=1&tab=tab-sraps';
-    });
-  }
-
   document.querySelectorAll('.tabpanel').forEach(p=>{
     p.style.display = p.classList.contains('active') ? 'block' : 'none';
   });
@@ -1458,25 +1450,6 @@ document.addEventListener('DOMContentLoaded', function(){
       });
     });
   });
-
-  // If Global modal is open, auto-select tab from URL (?tab=tab-sraps or #tab-sraps)
-  const globalModal = document.getElementById('global-modal');
-  if (globalModal) {
-    const params = new URLSearchParams(location.search);
-    const targetTabId = params.get('tab') || (location.hash ? location.hash.replace('#','') : '');
-    if (targetTabId) {
-      const tabBtn = globalModal.querySelector('.tabs .tab[data-tab="'+targetTabId+'"]');
-      const panel = document.getElementById(targetTabId);
-      if (tabBtn && panel) {
-        const tabsEl = tabBtn.parentElement;
-        tabsEl.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-        tabBtn.classList.add('active');
-        const panels = Array.from(panel.parentElement.querySelectorAll('.tabpanel'));
-        panels.forEach(p => { p.classList.remove('active'); p.style.display = 'none'; });
-        panel.classList.add('active'); panel.style.display = 'block';
-      }
-    }
-  }
 
   // Toggle force admin password field
   const chk = document.getElementById('force_admin_password');
@@ -1617,7 +1590,7 @@ function attachMacCombos() {
     function findModelForMac(mac) {
       if (!mac) return '';
       for (let i=0;i<macList.length;i++){
-        const m = (macList[i].mac || it.MAC || '').toString().replace(/[^A-Fa-f0-9]/g,'').toUpperCase();
+        const m = (macList[i].mac || macList[i].MAC || '').toString().replace(/[^A-Fa-f0-9]/g,'').toUpperCase();
         if (m === mac) return (macList[i].model || '').toString();
       }
       return '';
