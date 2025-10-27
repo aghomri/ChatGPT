@@ -3,7 +3,7 @@ ini_set('display_errors', 0);
 error_reporting(E_ALL);
 session_start();
 
-$UI_BUILD = '2025-10-27 v18.7: removed global force-admin-password, added user_srtp/user_savp/filter_registrar, Lock LCD removed, custom XML sub-tabs for families, added D7xx/D1xx models';
+$UI_BUILD = '2025-10-27 v18.2: SRAPS push toggle respected, toast 5s, client-side release flag to avoid duplicate release';
 header('X-UI-Build: '.$UI_BUILD);
 
 ini_set('default_charset', 'UTF-8');
@@ -378,12 +378,7 @@ foreach ($exts as $ee) {
     $fullname_by_ext[(string)($ee['extension'] ?? '')] = sanitize_for_ui($ee['fullname'] ?? '');
 }
 
-/* Write profile (XML)
-   Important changes:
-   - keep per-device admin/http password (generated if missing)
-   - include new security tags: user_srtp, user_savp, filter_registrar
-   - include custom XML fragments in order: global general, then family-specific (D8xx/D7xx/D1xx), then per-device custom_xml
-*/
+/* Write profile (XML) */
 function write_profile($dir, $ucm_host, $extInfo, $mac, $overrides = [], $all_exts = []) {
     $mac = strtoupper(preg_replace('/[^A-Fa-f0-9]/','', (string)$mac));
     if ($mac === '') return [false, 'Invalid MAC'];
@@ -407,14 +402,15 @@ function write_profile($dir, $ucm_host, $extInfo, $mac, $overrides = [], $all_ex
     $fullname_map = [];
     foreach ($all_exts as $ae) { $fullname_map[(string)$ae['extension']] = sanitize_for_ui($ae['fullname'] ?? ''); }
 
-    // Admin password: per-device; keep ability to set via per-device overrides (http_pass) or generate
+    // Admin password without special characters; user password may keep symbols
     $admin_pass = isset($overrides['http_pass']) && $overrides['http_pass'] !== '' ? (string)$overrides['http_pass'] : random_password_no_symbols(16);
     $user_pass  = isset($overrides['user_http_pass']) && $overrides['user_http_pass'] !== '' ? (string)$overrides['user_http_pass'] : random_password(16);
 
-    $custom_xml_global = (string)($overrides['custom_xml_general'] ?? $overrides['custom_xml_global'] ?? '');
-    $custom_xml_d8 = (string)($overrides['custom_xml_d8xx'] ?? '');
-    $custom_xml_d7 = (string)($overrides['custom_xml_d7xx'] ?? '');
-    $custom_xml_d1 = (string)($overrides['custom_xml_d1xx'] ?? '');
+    if (($overrides['force_admin_password'] ?? '') === 'on' && !empty($overrides['forced_admin_password'])) {
+        $admin_pass = (string)$overrides['forced_admin_password'];
+    }
+
+    $custom_xml_global = (string)($overrides['custom_xml_global'] ?? '');
     $custom_xml_ext    = (string)($overrides['custom_xml'] ?? '');
 
     $sip_tos = dscp_to_tos($overrides['net_dscp_sip'] ?? null);
@@ -448,17 +444,6 @@ function write_profile($dir, $ucm_host, $extInfo, $mac, $overrides = [], $all_ex
     $mute_is_dnd_in_idle = (string)($overrides['mute_is_dnd_in_idle'] ?? 'on');
 
     $tbook_url = (string)($overrides['contacts_tbook_url'] ?? '');
-
-    // Security-related globals (defaults if absent)
-    $user_srtp = (string)($overrides['user_srtp'] ?? ($overrides['global_user_srtp'] ?? 'off')); // on/off
-    $user_savp = (string)($overrides['user_savp'] ?? ($overrides['global_user_savp'] ?? 'off')); // off/optional/mandatory
-    $filter_registrar = (string)($overrides['filter_registrar'] ?? ($overrides['global_filter_registrar'] ?? 'off')); // on/off
-
-    // Normalize values
-    $user_srtp = ($user_srtp === 'on') ? 'on' : 'off';
-    $allowed_savp = ['off','optional','mandatory'];
-    if (!in_array($user_savp, $allowed_savp, true)) $user_savp = 'off';
-    $filter_registrar = ($filter_registrar === 'on') ? 'on' : 'off';
 
     $xml  = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
     $xml .= "<settings>\n";
@@ -576,11 +561,6 @@ function write_profile($dir, $ucm_host, $extInfo, $mac, $overrides = [], $all_ex
     $xml .= "    <transfer_dialing_on perm=\"RW\">".htmlspecialchars($transfer_dialing_on, ENT_QUOTES, 'UTF-8')."</transfer_dialing_on>\n";
     $xml .= "    <mute_is_dnd_in_idle perm=\"RW\">".htmlspecialchars($mute_is_dnd_in_idle, ENT_QUOTES, 'UTF-8')."</mute_is_dnd_in_idle>\n";
 
-    // Security options (new)
-    $xml .= "    <user_srtp perm=\"RW\">".htmlspecialchars($user_srtp, ENT_QUOTES, 'UTF-8')."</user_srtp>\n";
-    $xml .= "    <user_savp perm=\"RW\">".htmlspecialchars($user_savp, ENT_QUOTES, 'UTF-8')."</user_savp>\n";
-    $xml .= "    <filter_registrar perm=\"RW\">".htmlspecialchars($filter_registrar, ENT_QUOTES, 'UTF-8')."</filter_registrar>\n";
-
     $xml .= "    <webserver_user_name perm=\"RW\">user</webserver_user_name>\n";
     $xml .= "    <webserver_user_password perm=\"RW\">".htmlspecialchars($user_pass, ENT_QUOTES, 'UTF-8')."</webserver_user_password>\n";
     $xml .= "    <http_user perm=\"RW\">admin</http_user>\n";
@@ -589,22 +569,9 @@ function write_profile($dir, $ucm_host, $extInfo, $mac, $overrides = [], $all_ex
     $xml .= "    <admin_mode_password perm=\"RW\">".htmlspecialchars($admin_pass, ENT_QUOTES, 'UTF-8')."</admin_mode_password>\n";
     $xml .= "    <webserver_admin_password perm=\"RW\">".htmlspecialchars($admin_pass, ENT_QUOTES, 'UTF-8')."</webserver_admin_password>\n";
 
-    // Insert custom XML: global general first
     if (trim($custom_xml_global) !== '') {
         foreach (explode("\n", $custom_xml_global) as $L) { $xml .= '    ' . rtrim($L) . "\n"; }
     }
-    // family specific: determine by model prefix
-    $model_up = strtoupper(trim($model));
-    if ($model_up !== '') {
-        if (strpos($model_up, 'D8') === 0 && trim($custom_xml_d8) !== '') {
-            foreach (explode("\n", $custom_xml_d8) as $L) { $xml .= '    ' . rtrim($L) . "\n"; }
-        } elseif (strpos($model_up, 'D7') === 0 && trim($custom_xml_d7) !== '') {
-            foreach (explode("\n", $custom_xml_d7) as $L) { $xml .= '    ' . rtrim($L) . "\n"; }
-        } elseif (strpos($model_up, 'D1') === 0 && trim($custom_xml_d1) !== '') {
-            foreach (explode("\n", $custom_xml_d1) as $L) { $xml .= '    ' . rtrim($L) . "\n"; }
-        }
-    }
-    // per-device custom xml
     if (trim($custom_xml_ext) !== '') {
         foreach (explode("\n", $custom_xml_ext) as $L) { $xml .= '    ' . rtrim($L) . "\n"; }
     }
@@ -689,40 +656,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign']) && is_array
     header('Location: extensions.php?system_id=' . (int)$sysId); exit;
 }
 
-/* Global Settings save (SRAPS toggles + new security options + custom xml parts) */
+/* Global Settings save (add SRAPS toggles + keep defaults) */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_global'])) {
     $incoming = (array)($_POST['global'] ?? []);
     $wiz['global'] = array_replace($wiz['global'], $incoming);
 
     // Booleans/toggles
+    if (!isset($incoming['force_admin_password'])) {
+        $wiz['global']['force_admin_password'] = 'off';
+    }
     if (!isset($incoming['use_sraps'])) {
         $wiz['global']['use_sraps'] = 'off';
     } else {
         $wiz['global']['use_sraps'] = 'on';
     }
-    // Respect unchecked state for the push toggle
+    // IMPORTANT: respect unchecked state. If checkbox not in POST, treat as 'off'.
     if (!isset($incoming['sraps_push_on_generate'])) {
         $wiz['global']['sraps_push_on_generate'] = 'off';
     } else {
         $wiz['global']['sraps_push_on_generate'] = 'on';
     }
-
-    // Remove global force_admin_password entirely (do not persist)
-    if (isset($wiz['global']['force_admin_password'])) unset($wiz['global']['force_admin_password']);
-    if (isset($wiz['global']['forced_admin_password'])) unset($wiz['global']['forced_admin_password']);
-
-    // New security options: user_srtp (on/off), user_savp (off/optional/mandatory), filter_registrar (on/off)
-    $wiz['global']['user_srtp'] = (isset($incoming['user_srtp']) && $incoming['user_srtp']==='on') ? 'on' : 'off';
-    $allowed_savp = ['off','optional','mandatory'];
-    $savp_raw = strtolower(trim((string)($incoming['user_savp'] ?? 'off')));
-    $wiz['global']['user_savp'] = in_array($savp_raw, $allowed_savp, true) ? $savp_raw : 'off';
-    $wiz['global']['filter_registrar'] = (isset($incoming['filter_registrar']) && $incoming['filter_registrar']==='on') ? 'on' : 'off';
-
-    // Custom XML per-family and general
-    $wiz['global']['custom_xml_general'] = (string)($incoming['custom_xml_general'] ?? $wiz['global']['custom_xml_general'] ?? '');
-    $wiz['global']['custom_xml_d8xx']   = (string)($incoming['custom_xml_d8xx'] ?? $wiz['global']['custom_xml_d8xx'] ?? '');
-    $wiz['global']['custom_xml_d7xx']   = (string)($incoming['custom_xml_d7xx'] ?? $wiz['global']['custom_xml_d7xx'] ?? '');
-    $wiz['global']['custom_xml_d1xx']   = (string)($incoming['custom_xml_d1xx'] ?? $wiz['global']['custom_xml_d1xx'] ?? '');
 
     // Defaults and clamps
     if (empty($wiz['global']['setting_server'])) {
@@ -807,18 +760,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_one']) && $_
     $over['__model'] = $wiz['assign'][$ext]['model'] ?? '';
     $global = $wiz['global'] ?? [];
     $merged = array_merge($global, $over);
-
-    // Ensure security options propagate to merged overrides (per-device override possible)
-    $merged['user_srtp'] = $merged['user_srtp'] ?? ($wiz['global']['user_srtp'] ?? 'off');
-    $merged['user_savp'] = $merged['user_savp'] ?? ($wiz['global']['user_savp'] ?? 'off');
-    $merged['filter_registrar'] = $merged['filter_registrar'] ?? ($wiz['global']['filter_registrar'] ?? 'off');
-
-    // propagate family custom xml into merged so write_profile can include them
-    $merged['custom_xml_general'] = $merged['custom_xml_general'] ?? ($wiz['global']['custom_xml_general'] ?? '');
-    $merged['custom_xml_d8xx']   = $merged['custom_xml_d8xx'] ?? ($wiz['global']['custom_xml_d8xx'] ?? '');
-    $merged['custom_xml_d7xx']   = $merged['custom_xml_d7xx'] ?? ($wiz['global']['custom_xml_d7xx'] ?? '');
-    $merged['custom_xml_d1xx']   = $merged['custom_xml_d1xx'] ?? ($wiz['global']['custom_xml_d1xx'] ?? '');
-
     if (empty($merged['setting_server'])) $merged['setting_server'] = 'v2.6.1c/provisioning_files';
     $oldfile = rtrim($PROVISION_DIR,'/')."/{$mac}.xml"; if (file_exists($oldfile)) @unlink($oldfile);
     [$ok,$res] = write_profile($PROVISION_DIR, $sys['host'], $found, $mac, $merged, $exts);
@@ -863,16 +804,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_selected']) 
         if (empty($over['user_http_pass'])) { $over['user_http_pass'] = random_password(16); $wiz['settings'][$ext]['user_http_pass'] = $over['user_http_pass']; }
         $over['__model'] = $wiz['assign'][$ext]['model'] ?? '';
         $merged = array_merge($global, $over);
-
-        $merged['user_srtp'] = $merged['user_srtp'] ?? ($wiz['global']['user_srtp'] ?? 'off');
-        $merged['user_savp'] = $merged['user_savp'] ?? ($wiz['global']['user_savp'] ?? 'off');
-        $merged['filter_registrar'] = $merged['filter_registrar'] ?? ($wiz['global']['filter_registrar'] ?? 'off');
-
-        $merged['custom_xml_general'] = $merged['custom_xml_general'] ?? ($wiz['global']['custom_xml_general'] ?? '');
-        $merged['custom_xml_d8xx']   = $merged['custom_xml_d8xx'] ?? ($wiz['global']['custom_xml_d8xx'] ?? '');
-        $merged['custom_xml_d7xx']   = $merged['custom_xml_d7xx'] ?? ($wiz['global']['custom_xml_d7xx'] ?? '');
-        $merged['custom_xml_d1xx']   = $merged['custom_xml_d1xx'] ?? ($wiz['global']['custom_xml_d1xx'] ?? '');
-
         if (empty($merged['setting_server'])) $merged['setting_server'] = 'v2.6.1c/provisioning_files';
         $oldfile = rtrim($PROVISION_DIR,'/')."/{$mac}.xml"; if (file_exists($oldfile)) @unlink($oldfile);
         [$ok,$res] = write_profile($PROVISION_DIR, $sys['host'], $found, $mac, $merged, $exts);
@@ -896,7 +827,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_selected']) 
         } else $errors[]="Failed {$ext}: {$res}";
     }
     save_wiz_to_db($pdo,$sysId,$uid,$wiz);
-    $msg = "Generated {$count} profiles."; if (!empty($errors)) $msg .= ' Errors: '.implode('; ',$errors);
+    $msg = "Generated {$count} profiles."; if (!empty($errors)) $msg .= ' Errors: '.implode('; ',$errors) ;
     $wiz['flash']=['msg'=>$msg,'type'=>$count ? 'success' : 'warn'];
     save_wiz_to_db($pdo,$sysId,$uid,$wiz);
     header('Location: extensions.php?system_id='.(int)$sysId); exit;
@@ -918,16 +849,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['regenerate_all_existi
         if (empty($over['user_http_pass'])) { $over['user_http_pass'] = random_password(16); $wiz['settings'][$ext]['user_http_pass'] = $over['user_http_pass']; }
         $over['__model'] = $wiz['assign'][$ext]['model'] ?? '';
         $merged = array_merge($global, $over);
-
-        $merged['user_srtp'] = $merged['user_srtp'] ?? ($wiz['global']['user_srtp'] ?? 'off');
-        $merged['user_savp'] = $merged['user_savp'] ?? ($wiz['global']['user_savp'] ?? 'off');
-        $merged['filter_registrar'] = $merged['filter_registrar'] ?? ($wiz['global']['filter_registrar'] ?? 'off');
-
-        $merged['custom_xml_general'] = $merged['custom_xml_general'] ?? ($wiz['global']['custom_xml_general'] ?? '');
-        $merged['custom_xml_d8xx']   = $merged['custom_xml_d8xx'] ?? ($wiz['global']['custom_xml_d8xx'] ?? '');
-        $merged['custom_xml_d7xx']   = $merged['custom_xml_d7xx'] ?? ($wiz['global']['custom_xml_d7xx'] ?? '');
-        $merged['custom_xml_d1xx']   = $merged['custom_xml_d1xx'] ?? ($wiz['global']['custom_xml_d1xx'] ?? '');
-
         if (empty($merged['setting_server'])) $merged['setting_server'] = 'v2.6.1c/provisioning_files';
         $oldfile = rtrim($PROVISION_DIR,'/')."/{$mac}.xml"; if (file_exists($oldfile)) @unlink($oldfile);
         [$ok,$res] = write_profile($PROVISION_DIR, $sys['host'], $found, $mac, $merged, $exts);
@@ -1164,7 +1085,7 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
         <button class="btn inline" type="submit" name="open_global" value="1">Global Settings</button>
       </form>
       <button class="btn inline" id="save-assignments-btn" type="button" onclick="document.getElementById('assign-form').submit()">Save Assignments</button>
-      <!-- D7xx top-level button removed per request -->
+      <button class="btn inline" type="button" onclick="location.href='d7xx.php?system_id=<?= (int)$sysId ?>'">D7xx Series</button>
       <button class="btn inline" type="button" onclick="location.href='dect.php?system_id=<?= (int)$sysId ?>'">DECT</button>
       <button class="btn inline" type="button" onclick="location.href='m500.php?system_id=<?= (int)$sysId ?>'">M500</button>
       <button class="btn inline" type="button" onclick="location.href='hotel.php?system_id=<?= (int)$sysId ?>'">Hotel Phones</button>
@@ -1199,10 +1120,7 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
             <td class="col-model">
               <select name="assign[<?= e($ext) ?>][model]" class="small-input">
                 <option value="">Select</option>
-                <?php
-                $models = ['D862','D865','D895','D892','D815','D812','D785','D735','D717','D713','D150','D140','D120'];
-                foreach ($models as $m) { $sel = ($modelVal === $m) ? 'selected' : ''; echo "<option value=\"".e($m)."\" $sel>".e($m)."</option>"; }
-                ?>
+                <?php foreach (['D862','D865','D895','D892'] as $m) { $sel = ($modelVal === $m) ? 'selected' : ''; echo "<option value=\"".e($m)."\" $sel>".e($m)."</option>"; } ?>
               </select>
             </td>
             <td>
@@ -1373,7 +1291,7 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
         <div class="section-card">
           <div class="form-grid">
             <?php
-              $models = ['D895','D892','D865','D862','D815','D812','D785','D735','D717','D713','D150','D140','D120','D810WB'];
+              $models = ['D895','D892','D865','D862','D815','D812','D150','D140','D810WB'];
               foreach ($models as $m) {
                 $key = 'maint_fw_'.strtoupper($m);
                 $val = $wiz['global'][$key] ?? '';
@@ -1436,32 +1354,23 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
               </select>
             </div>
 
-            <!-- Lock LCD removed per request -->
-
-            <div class="label">User SRTP</div>
+            <div class="label">Lock LCD</div>
             <div class="value">
-              <select class="small-input" name="global[user_srtp]">
-                <?php $usr_srtp = ($wiz['global']['user_srtp'] ?? 'off'); ?>
-                <option value="off" <?= $usr_srtp==='off'?'selected':''; ?>>Off</option>
-                <option value="on" <?= $usr_srtp==='on'?'selected':''; ?>>On</option>
+              <select class="small-input" name="global[sec_lock_lcd]">
+                <?php $lk = $wiz['global']['sec_lock_lcd'] ?? 'off';
+                  foreach (['off'=>'Off','on'=>'On'] as $k=>$v){ $sel=($lk===$k)?'selected':''; echo "<option value=\"$k\" $sel>$v</option>"; } ?>
               </select>
             </div>
 
-            <div class="label">User SAVP</div>
+            <div class="label">Force admin password</div>
             <div class="value">
-              <?php $usr_savp = ($wiz['global']['user_savp'] ?? 'off'); ?>
-              <select class="small-input" name="global[user_savp]">
-                <option value="off" <?= $usr_savp==='off'?'selected':''; ?>>off</option>
-                <option value="optional" <?= $usr_savp==='optional'?'selected':''; ?>>optional</option>
-                <option value="mandatory" <?= $usr_savp==='mandatory'?'selected':''; ?>>mandatory</option>
-              </select>
+              <input type="checkbox" id="force_admin_password" name="global[force_admin_password]" value="on" <?= (($wiz['global']['force_admin_password'] ?? 'off') === 'on') ? 'checked' : '' ?>>
             </div>
 
-            <div class="label">Filter Registrar</div>
+            <div class="label">Admin password (HTTP)</div>
             <div class="value">
-              <input type="checkbox" name="global[filter_registrar]" value="on" <?= (($wiz['global']['filter_registrar'] ?? 'off') === 'on') ? 'checked' : '' ?>>
+              <input class="small-input" type="password" id="forced_admin_password" name="global[forced_admin_password]" value="<?= e($wiz['global']['forced_admin_password'] ?? '') ?>" placeholder="Enter admin password" <?= (($wiz['global']['force_admin_password'] ?? 'off') === 'on') ? '' : 'disabled' ?>>
             </div>
-
           </div>
         </div>
       </div>
@@ -1545,48 +1454,17 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
         </div>
       </div>
 
-      <!-- Global Custom XML with sub-tabs: General / D8xx / D7xx / D1xx -->
+      <!-- Global Custom XML -->
       <div id="tab-custom" class="tabpanel">
         <div class="section-card">
-          <div class="tabs" style="margin-bottom:8px">
-            <div class="tab active" data-tab="custom-general">General</div>
-            <div class="tab" data-tab="custom-d8">D8xx</div>
-            <div class="tab" data-tab="custom-d7">D7xx</div>
-            <div class="tab" data-tab="custom-d1">D1xx</div>
-          </div>
-
-          <div id="custom-general" class="tabpanel active">
-            <div style="margin-bottom:8px"><small>Applied to all phones</small></div>
-            <textarea class="area" name="global[custom_xml_general]" placeholder="Custom XML for all phones"><?php
-              echo htmlspecialchars(sanitize_for_ui($wiz['global']['custom_xml_general'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-            ?></textarea>
-          </div>
-
-          <div id="custom-d8" class="tabpanel" style="display:none">
-            <div style="margin-bottom:8px"><small>Applied to D8xx family (models starting with D8)</small></div>
-            <textarea class="area" name="global[custom_xml_d8xx]" placeholder="Custom XML for D8xx"><?php
-              echo htmlspecialchars(sanitize_for_ui($wiz['global']['custom_xml_d8xx'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-            ?></textarea>
-          </div>
-
-          <div id="custom-d7" class="tabpanel" style="display:none">
-            <div style="margin-bottom:8px"><small>Applied to D7xx family (models starting with D7)</small></div>
-            <textarea class="area" name="global[custom_xml_d7xx]" placeholder="Custom XML for D7xx"><?php
-              echo htmlspecialchars(sanitize_for_ui($wiz['global']['custom_xml_d7xx'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-            ?></textarea>
-          </div>
-
-          <div id="custom-d1" class="tabpanel" style="display:none">
-            <div style="margin-bottom:8px"><small>Applied to D1xx family (models starting with D1)</small></div>
-            <textarea class="area" name="global[custom_xml_d1xx]" placeholder="Custom XML for D1xx"><?php
-              echo htmlspecialchars(sanitize_for_ui($wiz['global']['custom_xml_d1xx'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-            ?></textarea>
-          </div>
-
+          <textarea class="area" name="global[custom_xml_global]" placeholder="Custom XML under <phone-settings> (global)"><?php
+            $cxg = (string)($wiz['global']['custom_xml_global'] ?? '');
+            echo htmlspecialchars(sanitize_for_ui($cxg), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+          ?></textarea>
         </div>
       </div>
 
-      <!-- SRAPS -->
+      <!-- SRAPS (only two options requested) -->
       <div id="tab-sraps" class="tabpanel">
         <div class="section-card">
           <div class="form-grid">
@@ -1642,10 +1520,8 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
                 <input class="small-input" id="http_pass_mask" type="password" value="<?= e($masked) ?>" readonly placeholder="*********">
                 <button type="button" class="btn secondary inline" onclick="toggleHttpPass()">Show/Hide</button>
                 <button type="button" class="btn inline" onclick="copyHttpPass()">Copy</button>
-                <input type="text" name="cfg_http_pass_real" id="cfg_http_pass_real" value="<?= e($over['http_pass'] ?? '') ?>" style="display:none">
-                <button type="button" class="btn" onclick="editHttpPass()">Edit</button>
+                <input type="hidden" name="cfg_http_pass_real" id="cfg_http_pass_real" value="<?= e($over['http_pass'] ?? '') ?>">
               </div>
-              <div style="margin-top:8px;color:#64748b;font-size:12px">You may edit the admin password for this device. If left empty, a random password is generated.</div>
             </div>
           </div>
         </div>
@@ -1821,7 +1697,6 @@ document.addEventListener('DOMContentLoaded', function(){
         tabsEl.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
         tab.classList.add('active');
 
-// continuation of extensions.php - JavaScript and closing tags
         let groupPanels = [];
         if (panel && panel.parentElement) {
           groupPanels = Array.from(panel.parentElement.querySelectorAll('.tabpanel'));
@@ -1859,7 +1734,7 @@ document.addEventListener('DOMContentLoaded', function(){
     }
   }
 
-  // Toggle force admin password field (removed in newer UI, but keep defensive code)
+  // Toggle force admin password field
   const chk = document.getElementById('force_admin_password');
   const pwd = document.getElementById('forced_admin_password');
   if (chk && pwd) {
@@ -1868,23 +1743,6 @@ document.addEventListener('DOMContentLoaded', function(){
       else { pwd.setAttribute('disabled','disabled'); }
     });
   }
-
-  // Tab handling for nested custom XML tabs inside Global -> Custom XML
-  document.querySelectorAll('#tab-custom .tabs').forEach(tabsEl => {
-    tabsEl.querySelectorAll('.tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        const tgt = tab.getAttribute('data-tab');
-        if (!tgt) return;
-        tabsEl.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-        tab.classList.add('active');
-        const panels = tabsEl.parentElement.querySelectorAll('.tabpanel');
-        panels.forEach(p => {
-          if (p.id === tgt) { p.classList.add('active'); p.style.display = 'block'; }
-          else { p.classList.remove('active'); p.style.display = 'none'; }
-        });
-      });
-    });
-  });
 
   // Dynamic search (client-side only)
   const searchInput = document.getElementById('search-all');
@@ -1903,11 +1761,13 @@ document.addEventListener('DOMContentLoaded', function(){
   }
   if (searchInput) {
     searchInput.addEventListener('input', applySearchFilter);
-    searchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); applySearchFilter(); } });
+    searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); applySearchFilter(); }
+    });
   }
   if (searchBtn) searchBtn.addEventListener('click', applySearchFilter);
 
-  // Attach MAC combos (suggestions + model autofill)
+  // Attach MAC combos
   attachMacCombos();
 
   // Clear file input value so selecting same file again works in browsers
@@ -1915,15 +1775,7 @@ document.addEventListener('DOMContentLoaded', function(){
   if (macCsvInput) {
     try { macCsvInput.value = ''; } catch (e) {}
   }
-
-  // finalize: if server rendered modal open, leave it visible (server sets show_global)
-  if (globalModal && <?= ($show_global ? 'true' : 'false') ?>) {
-    globalModal.style.display = 'flex';
-  }
-
-}); // end DOMContentLoaded
-
-/* Utility functions and actions */
+});
 
 function switchSiteGo(){
   const sel = document.getElementById('switch-site-select');
@@ -1971,25 +1823,13 @@ function copyHttpPass() {
   }
 }
 
-function editHttpPass(){
-  const real = document.getElementById('cfg_http_pass_real');
-  const mask = document.getElementById('http_pass_mask');
-  if (!real || !mask) return;
-  const newVal = prompt('Enter admin password for this device (leave empty to generate a random one):', real.value || '');
-  if (newVal === null) return; // cancelled
-  real.value = newVal;
-  mask.type = 'password';
-  mask.value = newVal ? '*********' : '';
-}
-
-/* BLF helpers */
 function currentBLFRowCount(){
   const list=document.getElementById('blf-list'); if (!list) return 0;
   return Array.from(list.querySelectorAll('select[name^="cfg_blf_type"]')).filter(s=> (s.value||'blf') !== 'none').length;
 }
 function addBLF(){
   const list=document.getElementById('blf-list'); if(!list) return;
-  if (typeof BLF_CAP === 'number' && currentBLFRowCount() >= BLF_CAP) { showToast('Reached maximum F-keys.','warn',5000); return; }
+  if (BLF_CAP !== null && currentBLFRowCount() >= BLF_CAP) { showToast('Reached maximum F-keys.','warn',5000); return; }
   const nextIdx = (list.querySelectorAll('select[name^="cfg_blf_type"]').length + 1);
   let extHtml = document.querySelector('#blf-list select[name^="cfg_blf_ext"]')?.innerHTML || '<option value="">-- Select Extension --</option>';
   const div=document.createElement('div'); div.style.display='flex'; div.style.gap='8px'; div.style.alignItems='center';
@@ -2004,7 +1844,6 @@ function addBLF(){
   list.appendChild(div);
 }
 
-/* Form helpers used by action buttons */
 function postEdit(ext){
   if(!ext) return;
   const f=document.createElement('form'); f.method='post'; f.style.display='none'; f.action='extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID);
@@ -2022,7 +1861,7 @@ function postGenerate(ext){
   document.body.appendChild(f); f.submit();
 }
 
-/* Improved confirmDelete: attempt SRAPS release via AJAX first (shows toast), then submit server-side delete POST */
+// Improved confirmDelete: attempt SRAPS release via AJAX first (shows toast), then submit server-side delete POST
 function confirmDelete(ext){
   if (!ext) return;
   if (!confirm('Delete generated provisioning file for extension ' + ext + ' ?')) return;
@@ -2033,6 +1872,7 @@ function confirmDelete(ext){
       const statusResp = await fetch('extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID) + '&sraps_action=status', {cache:'no-store'});
       const statusJson = await statusResp.json().catch(()=>({configured:false}));
       const useSraps = (statusJson && statusJson.configured) ? true : false;
+
       if (useSraps) {
         // find mac on client
         let mac = '';
@@ -2044,7 +1884,16 @@ function confirmDelete(ext){
             if ((e.extension && String(e.extension) === ext) || (e.label && String(e.label).indexOf(ext) === 0)) { mac = (e.mac||'').replace(/[^A-Fa-f0-9]/g,'').toUpperCase(); break; }
           }
         }
-        if (mac && mac.length===12) {
+        if (!mac) {
+          // try from generated map in DOM (if present)
+          const row = document.querySelector('.mac-combo[data-ext="'+ext+'"]');
+          if (row) {
+            const inp = row.querySelector('.mac-combo-input');
+            if (inp && inp.value) mac = inp.value.replace(/[^A-Fa-f0-9]/g,'').toUpperCase();
+          }
+        }
+
+        if (mac && mac.length === 12) {
           try {
             const relResp = await fetch('extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID) + '&sraps_action=release', {
               method: 'POST',
@@ -2054,31 +1903,50 @@ function confirmDelete(ext){
             const relJson = await relResp.json().catch(()=>null);
             if (relResp.ok && relJson && relJson.ok) {
               releasedByClient = true;
-              showToast('SRAPS: device released (' + mac + ')','success',5000);
+              showToast('SRAPS: device released (' + mac + ')', 'success', 5000);
+              setSrapsConnected(false);
             } else {
               const msg = (relJson && relJson.error) ? relJson.error : ('HTTP ' + (relResp.status || 'err'));
-              showToast('SRAPS release: ' + msg,'warn',5000);
+              showToast('SRAPS release: ' + msg, 'warn', 5000);
             }
           } catch (e) {
             console.error('SRAPS release ajax error', e);
-            showToast('SRAPS release AJAX error','warn',5000);
+            showToast('SRAPS release AJAX error', 'warn', 5000);
           }
         } else {
-          showToast('SRAPS: MAC not found client-side — server will attempt release','warn',5000);
+              showToast('SRAPS: MAC not found client-side — server will attempt release', 'warn', 5000);
         }
       }
     } catch (e) {
       console.error('SRAPS status check failed', e);
     } finally {
-      const f = document.createElement('form'); f.method='post'; f.style.display='none'; f.action='extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID);
-      const i = document.createElement('input'); i.type='hidden'; i.name='delete_generated'; i.value=ext; f.appendChild(i);
-      if (releasedByClient) { const s=document.createElement('input'); s.type='hidden'; s.name='sraps_released_client'; s.value='1'; f.appendChild(s); }
-      document.body.appendChild(f); f.submit();
+      // Submit server-side delete form to keep server-side behavior
+      const f = document.createElement('form');
+      f.method = 'post';
+      f.style.display = 'none';
+      f.action = 'extensions.php?system_id=' + encodeURIComponent(SYSTEM_ID);
+      const i = document.createElement('input');
+      i.type = 'hidden';
+      i.name = 'delete_generated';
+      i.value = ext;
+      f.appendChild(i);
+
+      // If client already released via AJAX, signal server to skip re-release
+      if (releasedByClient) {
+        const s = document.createElement('input');
+        s.type = 'hidden';
+        s.name = 'sraps_released_client';
+        s.value = '1';
+        f.appendChild(s);
+      }
+
+      document.body.appendChild(f);
+      f.submit();
     }
   })();
 }
 
-/* MAC combo implementation */
+/* MAC combo with model autofill + suggestions (fixed) */
 function attachMacCombos() {
   const macList = Array.isArray(MAC_LIST) ? MAC_LIST : [];
   document.querySelectorAll('.mac-combo').forEach(combo => {
@@ -2288,5 +2156,6 @@ function saveSrapsProfileMap(){
 }
 </script>
 
+<!-- UI_BUILD: <?= e($UI_BUILD) ?> | file: <?= e(__FILE__) ?> | mtime: <?= filemtime(__FILE__) ?> -->
 </body>
 </html>

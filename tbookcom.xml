@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<tbook e='2' complete="true">
+  <item context="active" type='master' fav="false" mod="true">
+    <!--
+        the following tags can reside only in the master entry:
+        * first_name
+        * last_name
+        * birthday
+        * fav
+    -->
+    <!--
+        the following tags can reside both in the master or in a member entry:
+        * group
+        * title
+        * organisation
+        * email
+        * note
+    -->
+    <!--
+ 
+        the following tags can reside only in a member entry:
+        * name (this is just an alias for the number, not the person)
+        * number
+        * type
+        * context (attribute of the 'item' tag meaning the outgoing identity)
+    -->
+    <name>Johnny</name>
+    <!-- the number in the Master entry is used as an identifier linking referred by the Member entries -->
+    <number>123</number>
+    <first_name>John</first_name>
+    <last_name>Doe</last_name>
+    <title>Mr.</title>
+  </item>
+  <item context="active" context="line2" type='' fav="false" mod="true">
+    <!-- Member entry of the Master entry with number 123 --> 
+    <last_name>123</last_name>
+    <number>003912345678</number>
+    <!-- in Member Entry should be "Member_Alias" -->
+    <first_name>Member_Alias</first_name>
+    <number_type>home</number_type>
+    <title>Boss</title>
+  </item>
+  <item context="active" type='' fav="false" mod="true">
+    <!-- Member entry of the Master entry with number 123 --> 
+    <last_name>123</last_name>
+    <number>003933812345</number>
+    <!-- in Member Entry should be "Member_Alias" -->
+    <first_name>Member_Alias</first_name>
+    <number_type>business</number_type>
+  </item>
+  <item context="active" type='' fav="false" mod="true">
+    <!-- Member entry of the Master entry with number 123 --> 
+    <last_name>123</last_name>
+    <number>003987654321</number>
+    <!-- in Member Entry should be "Member_Alias" -->
+    <first_name>Member_Alias</first_name>
+    <number_type>mobile</number_type>
+  </item>
+  <item context="active" type='' fav='false' mod="true">
+    <name>Adrian</name>
+    <number>42965</number>
+    <number_type>fixed</number_type>
+  </item>
+</tbook>
