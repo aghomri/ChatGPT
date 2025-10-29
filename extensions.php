@@ -382,7 +382,8 @@ foreach ($exts as $ee) {
    Important changes:
    - keep per-device admin/http password (generated if missing)
    - include new security tags: user_srtp, user_savp, filter_registrar
-   - include custom XML fragments in order: global general, then family-specific (D8xx/D7xx/D1xx), then per-device custom_xml
+   - include custom XML fragments in priority order: per-device custom (highest), family-specific (D8xx/D7xx/D1xx), then global general (lowest)
+   - auto-normalize global custom XML so adjacent tags are printed line-by-line even if user pasted single-line XML
 */
 function write_profile($dir, $ucm_host, $extInfo, $mac, $overrides = [], $all_exts = []) {
     $mac = strtoupper(preg_replace('/[^A-Fa-f0-9]/','', (string)$mac));
@@ -589,11 +590,12 @@ function write_profile($dir, $ucm_host, $extInfo, $mac, $overrides = [], $all_ex
     $xml .= "    <admin_mode_password perm=\"RW\">".htmlspecialchars($admin_pass, ENT_QUOTES, 'UTF-8')."</admin_mode_password>\n";
     $xml .= "    <webserver_admin_password perm=\"RW\">".htmlspecialchars($admin_pass, ENT_QUOTES, 'UTF-8')."</webserver_admin_password>\n";
 
-    // Insert custom XML: global general first
-    if (trim($custom_xml_global) !== '') {
-        foreach (explode("\n", $custom_xml_global) as $L) { $xml .= '    ' . rtrim($L) . "\n"; }
+    // Insert custom XML in priority order:
+    // 1) per-device custom XML (highest priority)
+    if (trim($custom_xml_ext) !== '') {
+        foreach (explode("\n", $custom_xml_ext) as $L) { $xml .= '    ' . rtrim($L) . "\n"; }
     }
-    // family specific: determine by model prefix
+    // 2) family-specific custom XML (model-specific)
     $model_up = strtoupper(trim($model));
     if ($model_up !== '') {
         if (strpos($model_up, 'D8') === 0 && trim($custom_xml_d8) !== '') {
@@ -604,9 +606,16 @@ function write_profile($dir, $ucm_host, $extInfo, $mac, $overrides = [], $all_ex
             foreach (explode("\n", $custom_xml_d1) as $L) { $xml .= '    ' . rtrim($L) . "\n"; }
         }
     }
-    // per-device custom xml
-    if (trim($custom_xml_ext) !== '') {
-        foreach (explode("\n", $custom_xml_ext) as $L) { $xml .= '    ' . rtrim($L) . "\n"; }
+    // 3) global general custom XML (lowest priority)
+    if (trim($custom_xml_global) !== '') {
+        // Normalize CRLF to LF for consistent splitting
+        $custom_xml_global = preg_replace("/\r\n?/", "\n", $custom_xml_global);
+        // If user pasted everything on a single line (e.g. >< adjacent tags),
+        // insert a newline between adjacent tags so each tag appears on its own line.
+        $custom_xml_global = preg_replace('/>\s*</', ">\n<", $custom_xml_global);
+        // Ensure there's a trailing newline so explode() yields last line correctly
+        $custom_xml_global = rtrim($custom_xml_global) . "\n";
+        foreach (explode("\n", $custom_xml_global) as $L) { $xml .= '    ' . rtrim($L) . "\n"; }
     }
 
     $xml .= "  </phone-settings>\n";
@@ -719,6 +728,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_global'])) {
     $wiz['global']['filter_registrar'] = (isset($incoming['filter_registrar']) && $incoming['filter_registrar']==='on') ? 'on' : 'off';
 
     // Custom XML per-family and general
+    // IMPORTANT: store raw string (preserve newlines). Do not sanitize to single-line here.
     $wiz['global']['custom_xml_general'] = (string)($incoming['custom_xml_general'] ?? $wiz['global']['custom_xml_general'] ?? '');
     $wiz['global']['custom_xml_d8xx']   = (string)($incoming['custom_xml_d8xx'] ?? $wiz['global']['custom_xml_d8xx'] ?? '');
     $wiz['global']['custom_xml_d7xx']   = (string)($incoming['custom_xml_d7xx'] ?? $wiz['global']['custom_xml_d7xx'] ?? '');
@@ -784,6 +794,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_settings']) && i
     }
     $settings['__blf'] = $blf;
 
+    // Store per-device custom XML raw (preserve newlines)
     $settings['custom_xml'] = (string)($_POST['cfg']['custom_xml'] ?? ($settings['custom_xml'] ?? ''));
 
     $wiz['settings'][$ext] = $settings;
@@ -1558,28 +1569,29 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
           <div id="custom-general" class="tabpanel active">
             <div style="margin-bottom:8px"><small>Applied to all phones</small></div>
             <textarea class="area" name="global[custom_xml_general]" placeholder="Custom XML for all phones"><?php
-              echo htmlspecialchars(sanitize_for_ui($wiz['global']['custom_xml_general'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+              // Preserve newlines for user-entered XML: use clean_utf8, NOT sanitize_for_ui (which collapses whitespace)
+              echo htmlspecialchars(clean_utf8($wiz['global']['custom_xml_general'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
             ?></textarea>
           </div>
 
           <div id="custom-d8" class="tabpanel" style="display:none">
             <div style="margin-bottom:8px"><small>Applied to D8xx family (models starting with D8)</small></div>
             <textarea class="area" name="global[custom_xml_d8xx]" placeholder="Custom XML for D8xx"><?php
-              echo htmlspecialchars(sanitize_for_ui($wiz['global']['custom_xml_d8xx'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+              echo htmlspecialchars(clean_utf8($wiz['global']['custom_xml_d8xx'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
             ?></textarea>
           </div>
 
           <div id="custom-d7" class="tabpanel" style="display:none">
             <div style="margin-bottom:8px"><small>Applied to D7xx family (models starting with D7)</small></div>
             <textarea class="area" name="global[custom_xml_d7xx]" placeholder="Custom XML for D7xx"><?php
-              echo htmlspecialchars(sanitize_for_ui($wiz['global']['custom_xml_d7xx'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+              echo htmlspecialchars(clean_utf8($wiz['global']['custom_xml_d7xx'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
             ?></textarea>
           </div>
 
           <div id="custom-d1" class="tabpanel" style="display:none">
             <div style="margin-bottom:8px"><small>Applied to D1xx family (models starting with D1)</small></div>
             <textarea class="area" name="global[custom_xml_d1xx]" placeholder="Custom XML for D1xx"><?php
-              echo htmlspecialchars(sanitize_for_ui($wiz['global']['custom_xml_d1xx'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+              echo htmlspecialchars(clean_utf8($wiz['global']['custom_xml_d1xx'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
             ?></textarea>
           </div>
 
@@ -1693,8 +1705,9 @@ $themeVer = file_exists($themeAbs) ? (int)filemtime($themeAbs) : time();
       <div id="tab-custom-ext" class="tabpanel">
         <div class="section-card">
           <textarea class="area" name="cfg[custom_xml]" placeholder="Custom XML under <phone-settings> (per device)"><?php
+            // Preserve newlines for per-device custom xml
             $cx = (string)($over['custom_xml'] ?? '');
-            echo htmlspecialchars(sanitize_for_ui($cx), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+            echo htmlspecialchars(clean_utf8($cx), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
           ?></textarea>
         </div>
       </div>
@@ -1821,7 +1834,6 @@ document.addEventListener('DOMContentLoaded', function(){
         tabsEl.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
         tab.classList.add('active');
 
-// continuation of extensions.php - JavaScript and closing tags
         let groupPanels = [];
         if (panel && panel.parentElement) {
           groupPanels = Array.from(panel.parentElement.querySelectorAll('.tabpanel'));
