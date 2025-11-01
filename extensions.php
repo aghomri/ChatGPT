@@ -104,6 +104,11 @@ function save_wiz_to_db(PDO $pdo, int $sysId, int $uid, array $wiz): bool {
         return true;
     } catch (Throwable $e) { provision_log('save_wiz_to_db error: '.$e->getMessage()); return false; }
 }
+function save_wiz_both(PDO $pdo, int $sysId, int $uid, array $wiz): bool {
+    $perUser = save_wiz_to_db($pdo, $sysId, $uid, $wiz);
+    $siteWide = save_wiz_to_db($pdo, $sysId, 0, $wiz);
+    return $perUser && $siteWide;
+}
 ensure_system_wiz_table($pdo);
 
 /* Load system */
@@ -214,8 +219,7 @@ if (isset($_GET['sraps_action'])) {
             $wiz['sraps']['secretKey'] = $secretToStore;
             $wiz['sraps']['statusOK'] = false;
             $wiz['sraps']['statusAt'] = '';
-            save_wiz_to_db($pdo,$sysId,$uid,$wiz);
-            save_wiz_to_db($pdo,$sysId,0,$wiz);
+            save_wiz_both($pdo, $sysId, $uid, $wiz);
             $out = ['ok'=>true];
         } elseif ($act === 'test') {
             $conf = $wiz['sraps'];
@@ -226,13 +230,11 @@ if (isset($_GET['sraps_action'])) {
                 $resp = sraps_test_connection($wiz['sraps']);
                 $wiz['sraps']['statusOK'] = true;
                 $wiz['sraps']['statusAt'] = date('c');
-                save_wiz_to_db($pdo,$sysId,$uid,$wiz);
-                save_wiz_to_db($pdo,$sysId,0,$wiz);
+                save_wiz_both($pdo, $sysId, $uid, $wiz);
                 $out = ['ok'=>true,'company'=>$resp['data'] ?? $resp];
             } catch (Throwable $e) {
                 $wiz['sraps']['statusOK'] = false; $wiz['sraps']['statusAt'] = date('c');
-                save_wiz_to_db($pdo,$sysId,$uid,$wiz);
-                save_wiz_to_db($pdo,$sysId,0,$wiz);
+                save_wiz_both($pdo, $sysId, $uid, $wiz);
                 throw $e;
             }
         } elseif ($act === 'get_profiles') {
@@ -249,8 +251,7 @@ if (isset($_GET['sraps_action'])) {
                 'M500'  => (string)($in['profile_M500'] ?? ''),
                 'HOTEL' => (string)($in['profile_HOTEL'] ?? ''),
             ];
-            save_wiz_to_db($pdo,$sysId,$uid,$wiz);
-            save_wiz_to_db($pdo,$sysId,0,$wiz);
+            save_wiz_both($pdo, $sysId, $uid, $wiz);
             $out = ['ok'=>true,'saved'=>$wiz['sraps']['profilesCat']];
         } elseif ($act === 'assign' && $_SERVER['REQUEST_METHOD']==='POST') {
             $raw = file_get_contents('php://input') ?: '';
