@@ -113,7 +113,6 @@ function save_sraps_to_system_store(PDO $pdo, int $sysId, array $wiz): void {
 function save_sraps_profiles_to_system_store(PDO $pdo, int $sysId, array $profilesCat): void {
     $system_store = load_wiz_from_db($pdo, $sysId, 0) ?: [];
     if (!isset($system_store['sraps'])) $system_store['sraps'] = [];
-    if (!isset($system_store['sraps']['profilesCat'])) $system_store['sraps']['profilesCat'] = [];
     $system_store['sraps']['profilesCat'] = $profilesCat;
     save_wiz_to_db($pdo, $sysId, 0, $system_store);
 }
