@@ -153,7 +153,15 @@ if (!isset($_SESSION['wiz'][$sysId])) {
     ];
 }
 $wiz = &$_SESSION['wiz'][$sysId];
-if ($db_wiz = load_wiz_from_db($pdo, $sysId, $uid)) { $_SESSION['wiz'][$sysId] = array_replace_recursive($wiz, $db_wiz); $wiz = &$_SESSION['wiz'][$sysId]; }
+// Load site-wide (user_id=0) first, then per-user overrides
+if ($db_wiz_site = load_wiz_from_db($pdo, $sysId, 0)) {
+    $_SESSION['wiz'][$sysId] = array_replace_recursive($wiz, $db_wiz_site);
+    $wiz = &$_SESSION['wiz'][$sysId];
+}
+if ($db_wiz = load_wiz_from_db($pdo, $sysId, $uid)) {
+    $_SESSION['wiz'][$sysId] = array_replace_recursive($wiz, $db_wiz);
+    $wiz = &$_SESSION['wiz'][$sysId];
+}
 
 // Ensure sraps structure
 if (!isset($wiz['sraps']) || !is_array($wiz['sraps'])) {
@@ -207,6 +215,7 @@ if (isset($_GET['sraps_action'])) {
             $wiz['sraps']['statusOK'] = false;
             $wiz['sraps']['statusAt'] = '';
             save_wiz_to_db($pdo,$sysId,$uid,$wiz);
+            save_wiz_to_db($pdo,$sysId,0,$wiz);
             $out = ['ok'=>true];
         } elseif ($act === 'test') {
             $conf = $wiz['sraps'];
@@ -218,15 +227,19 @@ if (isset($_GET['sraps_action'])) {
                 $wiz['sraps']['statusOK'] = true;
                 $wiz['sraps']['statusAt'] = date('c');
                 save_wiz_to_db($pdo,$sysId,$uid,$wiz);
+                save_wiz_to_db($pdo,$sysId,0,$wiz);
                 $out = ['ok'=>true,'company'=>$resp['data'] ?? $resp];
             } catch (Throwable $e) {
                 $wiz['sraps']['statusOK'] = false; $wiz['sraps']['statusAt'] = date('c');
                 save_wiz_to_db($pdo,$sysId,$uid,$wiz);
+                save_wiz_to_db($pdo,$sysId,0,$wiz);
                 throw $e;
             }
         } elseif ($act === 'get_profiles') {
             $profiles = sraps_fetch_profiles($wiz['sraps']);
             $out = ['profiles'=>$profiles];
+        } elseif ($act === 'get_category_profiles') {
+            $out = ['profilesCat'=>$wiz['sraps']['profilesCat'] ?? ['D'=>'','M'=>'','M500'=>'','HOTEL'=>'']];
         } elseif ($act === 'save_category_profiles' && $_SERVER['REQUEST_METHOD']==='POST') {
             $raw = file_get_contents('php://input') ?: '';
             $in = json_decode($raw, true) ?: [];
@@ -237,6 +250,7 @@ if (isset($_GET['sraps_action'])) {
                 'HOTEL' => (string)($in['profile_HOTEL'] ?? ''),
             ];
             save_wiz_to_db($pdo,$sysId,$uid,$wiz);
+            save_wiz_to_db($pdo,$sysId,0,$wiz);
             $out = ['ok'=>true,'saved'=>$wiz['sraps']['profilesCat']];
         } elseif ($act === 'assign' && $_SERVER['REQUEST_METHOD']==='POST') {
             $raw = file_get_contents('php://input') ?: '';
@@ -2251,15 +2265,23 @@ function testSrapsCreds(){
 function loadSrapsProfiles(){
   const countEl = document.getElementById('sraps-profile-count');
   if (countEl) countEl.textContent = 'Loading...';
-  fetch('extensions.php?system_id='+encodeURIComponent(SYSTEM_ID)+'&sraps_action=get_profiles')
-    .then(r=>r.json())
-    .then(res=>{
-      const profiles = Array.isArray(res.profiles) ? res.profiles : [];
+  
+  // Fetch both profiles and saved category mapping concurrently
+  Promise.all([
+    fetch('extensions.php?system_id='+encodeURIComponent(SYSTEM_ID)+'&sraps_action=get_profiles').then(r=>r.json()),
+    fetch('extensions.php?system_id='+encodeURIComponent(SYSTEM_ID)+'&sraps_action=get_category_profiles').then(r=>r.json())
+  ])
+    .then(([profilesRes, mappingRes]) => {
+      const profiles = Array.isArray(profilesRes.profiles) ? profilesRes.profiles : [];
+      const savedMapping = (mappingRes && mappingRes.profilesCat) ? mappingRes.profilesCat : {};
+      
       if (countEl) countEl.textContent = profiles.length + ' profiles';
-      fillProfileSelect('sraps-profile-D', profiles, "<?= e($wiz['sraps']['profilesCat']['D'] ?? '') ?>");
-      fillProfileSelect('sraps-profile-M', profiles, "<?= e($wiz['sraps']['profilesCat']['M'] ?? '') ?>");
-      fillProfileSelect('sraps-profile-M500', profiles, "<?= e($wiz['sraps']['profilesCat']['M500'] ?? '') ?>");
-      fillProfileSelect('sraps-profile-HOTEL', profiles, "<?= e($wiz['sraps']['profilesCat']['HOTEL'] ?? '') ?>");
+      
+      // Fill selects with profiles and apply saved mapping
+      fillProfileSelect('sraps-profile-D', profiles, savedMapping['D'] || '');
+      fillProfileSelect('sraps-profile-M', profiles, savedMapping['M'] || '');
+      fillProfileSelect('sraps-profile-M500', profiles, savedMapping['M500'] || '');
+      fillProfileSelect('sraps-profile-HOTEL', profiles, savedMapping['HOTEL'] || '');
     })
     .catch(()=>{ if (countEl) countEl.textContent=''; showToast('Failed to load profiles','warn',5000); });
 }
