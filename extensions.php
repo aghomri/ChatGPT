@@ -104,6 +104,12 @@ function save_wiz_to_db(PDO $pdo, int $sysId, int $uid, array $wiz): bool {
         return true;
     } catch (Throwable $e) { provision_log('save_wiz_to_db error: '.$e->getMessage()); return false; }
 }
+function save_sraps_to_system_store(PDO $pdo, int $sysId, array $wiz): void {
+    $system_store = load_wiz_from_db($pdo, $sysId, 0) ?: [];
+    if (!isset($system_store['sraps'])) $system_store['sraps'] = [];
+    $system_store['sraps'] = $wiz['sraps'];
+    save_wiz_to_db($pdo, $sysId, 0, $system_store);
+}
 ensure_system_wiz_table($pdo);
 
 /* Load system */
@@ -215,11 +221,7 @@ if (isset($_GET['sraps_action'])) {
             $wiz['sraps']['statusOK'] = false;
             $wiz['sraps']['statusAt'] = '';
             save_wiz_to_db($pdo,$sysId,$uid,$wiz);
-            // Also save site-wide (user_id=0)
-            $system_store = load_wiz_from_db($pdo,$sysId,0) ?: [];
-            if (!isset($system_store['sraps'])) $system_store['sraps'] = [];
-            $system_store['sraps'] = $wiz['sraps'];
-            save_wiz_to_db($pdo,$sysId,0,$system_store);
+            save_sraps_to_system_store($pdo,$sysId,$wiz);
             $out = ['ok'=>true];
         } elseif ($act === 'test') {
             $conf = $wiz['sraps'];
@@ -231,20 +233,12 @@ if (isset($_GET['sraps_action'])) {
                 $wiz['sraps']['statusOK'] = true;
                 $wiz['sraps']['statusAt'] = date('c');
                 save_wiz_to_db($pdo,$sysId,$uid,$wiz);
-                // Also save site-wide (user_id=0)
-                $system_store = load_wiz_from_db($pdo,$sysId,0) ?: [];
-                if (!isset($system_store['sraps'])) $system_store['sraps'] = [];
-                $system_store['sraps'] = $wiz['sraps'];
-                save_wiz_to_db($pdo,$sysId,0,$system_store);
+                save_sraps_to_system_store($pdo,$sysId,$wiz);
                 $out = ['ok'=>true,'company'=>$resp['data'] ?? $resp];
             } catch (Throwable $e) {
                 $wiz['sraps']['statusOK'] = false; $wiz['sraps']['statusAt'] = date('c');
                 save_wiz_to_db($pdo,$sysId,$uid,$wiz);
-                // Also save site-wide (user_id=0)
-                $system_store = load_wiz_from_db($pdo,$sysId,0) ?: [];
-                if (!isset($system_store['sraps'])) $system_store['sraps'] = [];
-                $system_store['sraps'] = $wiz['sraps'];
-                save_wiz_to_db($pdo,$sysId,0,$system_store);
+                save_sraps_to_system_store($pdo,$sysId,$wiz);
                 throw $e;
             }
         } elseif ($act === 'get_profiles') {
