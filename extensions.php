@@ -2219,6 +2219,15 @@ function openSrapsModal(){
   document.querySelectorAll('#sraps-modal .tabpanel').forEach(p => { p.style.display = 'none'; p.classList.remove('active'); });
   const panel = document.getElementById('s-cred');
   if (panel) { panel.style.display = 'block'; panel.classList.add('active'); }
+  
+  // Auto-load profiles when Profiles tab is clicked
+  const profTab = document.querySelector('#sraps-modal .tab[data-tab="s-prof"]');
+  if (profTab) {
+    profTab.addEventListener('click', function loadOnce(){
+      loadSrapsProfiles();
+      profTab.removeEventListener('click', loadOnce);
+    }, {once: true});
+  }
 }
 function closeSrapsModal(){ const m = document.getElementById('sraps-modal'); if (m) m.style.display='none'; }
 
