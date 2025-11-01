@@ -104,6 +104,18 @@ function save_wiz_to_db(PDO $pdo, int $sysId, int $uid, array $wiz): bool {
         return true;
     } catch (Throwable $e) { provision_log('save_wiz_to_db error: '.$e->getMessage()); return false; }
 }
+function save_sraps_to_system_store(PDO $pdo, int $sysId, array $wiz): void {
+    $system_store = load_wiz_from_db($pdo, $sysId, 0) ?: [];
+    if (!isset($system_store['sraps'])) $system_store['sraps'] = [];
+    $system_store['sraps'] = $wiz['sraps'];
+    save_wiz_to_db($pdo, $sysId, 0, $system_store);
+}
+function save_sraps_profiles_to_system_store(PDO $pdo, int $sysId, array $profilesCat): void {
+    $system_store = load_wiz_from_db($pdo, $sysId, 0) ?: [];
+    if (!isset($system_store['sraps'])) $system_store['sraps'] = [];
+    $system_store['sraps']['profilesCat'] = $profilesCat;
+    save_wiz_to_db($pdo, $sysId, 0, $system_store);
+}
 ensure_system_wiz_table($pdo);
 
 /* Load system */
@@ -153,7 +165,15 @@ if (!isset($_SESSION['wiz'][$sysId])) {
     ];
 }
 $wiz = &$_SESSION['wiz'][$sysId];
-if ($db_wiz = load_wiz_from_db($pdo, $sysId, $uid)) { $_SESSION['wiz'][$sysId] = array_replace_recursive($wiz, $db_wiz); $wiz = &$_SESSION['wiz'][$sysId]; }
+// Load order: site-wide (user_id=0) first, then per-user overrides
+if ($site_wiz = load_wiz_from_db($pdo, $sysId, 0)) {
+    $_SESSION['wiz'][$sysId] = array_replace_recursive($wiz, $site_wiz);
+    $wiz = &$_SESSION['wiz'][$sysId];
+}
+if ($user_wiz = load_wiz_from_db($pdo, $sysId, $uid)) {
+    $_SESSION['wiz'][$sysId] = array_replace_recursive($wiz, $user_wiz);
+    $wiz = &$_SESSION['wiz'][$sysId];
+}
 
 // Ensure sraps structure
 if (!isset($wiz['sraps']) || !is_array($wiz['sraps'])) {
@@ -207,6 +227,7 @@ if (isset($_GET['sraps_action'])) {
             $wiz['sraps']['statusOK'] = false;
             $wiz['sraps']['statusAt'] = '';
             save_wiz_to_db($pdo,$sysId,$uid,$wiz);
+            save_sraps_to_system_store($pdo,$sysId,$wiz);
             $out = ['ok'=>true];
         } elseif ($act === 'test') {
             $conf = $wiz['sraps'];
@@ -218,15 +239,19 @@ if (isset($_GET['sraps_action'])) {
                 $wiz['sraps']['statusOK'] = true;
                 $wiz['sraps']['statusAt'] = date('c');
                 save_wiz_to_db($pdo,$sysId,$uid,$wiz);
+                save_sraps_to_system_store($pdo,$sysId,$wiz);
                 $out = ['ok'=>true,'company'=>$resp['data'] ?? $resp];
             } catch (Throwable $e) {
                 $wiz['sraps']['statusOK'] = false; $wiz['sraps']['statusAt'] = date('c');
                 save_wiz_to_db($pdo,$sysId,$uid,$wiz);
+                save_sraps_to_system_store($pdo,$sysId,$wiz);
                 throw $e;
             }
         } elseif ($act === 'get_profiles') {
             $profiles = sraps_fetch_profiles($wiz['sraps']);
             $out = ['profiles'=>$profiles];
+        } elseif ($act === 'get_category_profiles') {
+            $out = ['ok'=>true, 'profilesCat'=>(array)($wiz['sraps']['profilesCat'] ?? ['D'=>'','M'=>'','M500'=>'','HOTEL'=>''])];
         } elseif ($act === 'save_category_profiles' && $_SERVER['REQUEST_METHOD']==='POST') {
             $raw = file_get_contents('php://input') ?: '';
             $in = json_decode($raw, true) ?: [];
@@ -237,6 +262,7 @@ if (isset($_GET['sraps_action'])) {
                 'HOTEL' => (string)($in['profile_HOTEL'] ?? ''),
             ];
             save_wiz_to_db($pdo,$sysId,$uid,$wiz);
+            save_sraps_profiles_to_system_store($pdo,$sysId,$wiz['sraps']['profilesCat']);
             $out = ['ok'=>true,'saved'=>$wiz['sraps']['profilesCat']];
         } elseif ($act === 'assign' && $_SERVER['REQUEST_METHOD']==='POST') {
             $raw = file_get_contents('php://input') ?: '';
@@ -2251,17 +2277,20 @@ function testSrapsCreds(){
 function loadSrapsProfiles(){
   const countEl = document.getElementById('sraps-profile-count');
   if (countEl) countEl.textContent = 'Loading...';
-  fetch('extensions.php?system_id='+encodeURIComponent(SYSTEM_ID)+'&sraps_action=get_profiles')
-    .then(r=>r.json())
-    .then(res=>{
-      const profiles = Array.isArray(res.profiles) ? res.profiles : [];
-      if (countEl) countEl.textContent = profiles.length + ' profiles';
-      fillProfileSelect('sraps-profile-D', profiles, "<?= e($wiz['sraps']['profilesCat']['D'] ?? '') ?>");
-      fillProfileSelect('sraps-profile-M', profiles, "<?= e($wiz['sraps']['profilesCat']['M'] ?? '') ?>");
-      fillProfileSelect('sraps-profile-M500', profiles, "<?= e($wiz['sraps']['profilesCat']['M500'] ?? '') ?>");
-      fillProfileSelect('sraps-profile-HOTEL', profiles, "<?= e($wiz['sraps']['profilesCat']['HOTEL'] ?? '') ?>");
-    })
-    .catch(()=>{ if (countEl) countEl.textContent=''; showToast('Failed to load profiles','warn',5000); });
+  Promise.all([
+    fetch('extensions.php?system_id='+encodeURIComponent(SYSTEM_ID)+'&sraps_action=get_profiles').then(r=>r.json()),
+    fetch('extensions.php?system_id='+encodeURIComponent(SYSTEM_ID)+'&sraps_action=get_category_profiles').then(r=>r.json())
+  ])
+  .then(([profilesRes, mappingRes]) => {
+    const profiles = Array.isArray(profilesRes.profiles) ? profilesRes.profiles : [];
+    const savedMapping = (mappingRes && mappingRes.profilesCat) ? mappingRes.profilesCat : {};
+    if (countEl) countEl.textContent = profiles.length + ' profiles';
+    fillProfileSelect('sraps-profile-D', profiles, savedMapping.D || '');
+    fillProfileSelect('sraps-profile-M', profiles, savedMapping.M || '');
+    fillProfileSelect('sraps-profile-M500', profiles, savedMapping.M500 || '');
+    fillProfileSelect('sraps-profile-HOTEL', profiles, savedMapping.HOTEL || '');
+  })
+  .catch(()=>{ if (countEl) countEl.textContent=''; showToast('Failed to load profiles','warn',5000); });
 }
 
 function fillProfileSelect(selId, profiles, selected){
