@@ -2223,9 +2223,8 @@ function openSrapsModal(){
   // Auto-load profiles when Profiles tab is clicked
   const profTab = document.querySelector('#sraps-modal .tab[data-tab="s-prof"]');
   if (profTab) {
-    profTab.addEventListener('click', function loadOnce(){
+    profTab.addEventListener('click', function(){
       loadSrapsProfiles();
-      profTab.removeEventListener('click', loadOnce);
     }, {once: true});
   }
 }
@@ -2275,10 +2274,13 @@ function loadSrapsProfiles(){
   const countEl = document.getElementById('sraps-profile-count');
   if (countEl) countEl.textContent = 'Loading...';
   
+  // Helper to build SRAPS action URL
+  const srapsUrl = (action) => 'extensions.php?system_id='+encodeURIComponent(SYSTEM_ID)+'&sraps_action='+action;
+  
   // Fetch both profiles and saved category mapping concurrently
   Promise.all([
-    fetch('extensions.php?system_id='+encodeURIComponent(SYSTEM_ID)+'&sraps_action=get_profiles').then(r=>r.json()),
-    fetch('extensions.php?system_id='+encodeURIComponent(SYSTEM_ID)+'&sraps_action=get_category_profiles').then(r=>r.json())
+    fetch(srapsUrl('get_profiles')).then(r=>r.json()),
+    fetch(srapsUrl('get_category_profiles')).then(r=>r.json())
   ])
     .then(([profilesRes, mappingRes]) => {
       const profiles = Array.isArray(profilesRes.profiles) ? profilesRes.profiles : [];
